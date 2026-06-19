@@ -1,0 +1,20 @@
+# Environment — contains secrets (Discord token, API keys)
+.env
+.env.backup
+
+# SQLite database — runtime data, not source
+*.db
+
+# Google service account credentials — contains private key
+*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
