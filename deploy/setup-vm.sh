@@ -23,7 +23,7 @@ else
 fi
 
 # ── 2. Persistent volume for SQLite ──────────────────────────────────────────
-podman volume create snoopy-data
+podman volume exists snoopy-data || podman volume create snoopy-data
 
 # ── 3. Build image from local code ───────────────────────────────────────────
 cd "$APP_DIR"
