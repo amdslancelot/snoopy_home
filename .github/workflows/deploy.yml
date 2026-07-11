@@ -48,5 +48,8 @@ jobs:
             cd ~/snoopy_home
             git pull https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git main
             podman build -t snoopy-home:latest .
-            systemctl --user restart snoopy-home
+            systemctl --user stop snoopy-home 2>/dev/null || true
+            podman ps -q --filter ancestor=localhost/snoopy-home:latest | xargs -r podman stop
+            systemctl --user reset-failed snoopy-home 2>/dev/null || true
+            systemctl --user start snoopy-home
             podman image prune -f

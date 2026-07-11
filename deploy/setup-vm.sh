@@ -15,6 +15,9 @@ fi
 
 echo "==> Detected Oracle Linux $OL_VER"
 
+# ── 0. System dependencies ────────────────────────────────────────────────────
+sudo dnf install -y git sqlite podman
+
 # ── 1. Clone or update repo ───────────────────────────────────────────────────
 if [[ -d "$APP_DIR/.git" ]]; then
     git -C "$APP_DIR" pull
@@ -56,6 +59,8 @@ Description=snoopy-home Discord bot
 Image=localhost/snoopy-home:latest
 Volume=snoopy-data:/data
 EnvironmentFile=%h/.env.snoopy
+Environment=PYTHONUNBUFFERED=1
+PodmanArgs=--log-driver=journald
 
 [Service]
 Restart=always
@@ -75,6 +80,7 @@ if [[ "$OL_VER" == "8" ]]; then
     systemctl --user enable --now snoopy-home
 elif [[ "$OL_VER" == "9" ]]; then
     # Quadlet units are auto-enabled via WantedBy=default.target — just start
+    systemctl --user reset-failed snoopy-home 2>/dev/null || true
     systemctl --user start snoopy-home
 fi
 
@@ -83,4 +89,4 @@ loginctl enable-linger opc
 
 echo ""
 echo "==> Done. Check status with: systemctl --user status snoopy-home"
-echo "==>         Logs:            journalctl --user -u snoopy-home -f"
+echo "==>         Logs:            sudo journalctl _SYSTEMD_USER_UNIT=snoopy-home.service -f"

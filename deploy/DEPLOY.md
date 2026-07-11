@@ -1,13 +1,14 @@
 # Deployment Guide — snoopy_home on OCI (Oracle Linux 8 / 9)
 
-Target: OCI VM running Oracle Linux 8 or 9. Podman pre-installed (no Docker, no OCIR needed).
-CI/CD: GitHub Actions tests → rsync code to VM → VM builds image locally → systemd restart.
+Target: OCI VM running Oracle Linux 8 or 9. No Docker, no OCIR needed — `setup-vm.sh` installs Podman via `dnf`.
+CI/CD: GitHub Actions tests → SSH into VM → git pull → build image locally → systemd restart.
 
 | | OL8 | OL9 |
 |---|---|---|
-| Podman version | 4.x | 4.6+ |
+| Podman version | 4.x | 4.6+ (tested: 5.8.2, installed via `dnf`) |
 | Systemd integration | `podman generate systemd` | Quadlets (`.container` file) |
 | Unit file location | `~/.config/systemd/user/` | `~/.config/containers/systemd/` |
+| Container name | `snoopy-home` | `systemd-snoopy-home` |
 | Setup script | auto-detected | auto-detected |
 | CI/CD deploy command | `systemctl --user restart snoopy-home` | same |
 
@@ -18,9 +19,9 @@ CI/CD: GitHub Actions tests → rsync code to VM → VM builds image locally →
 | File | Purpose |
 |---|---|
 | `Dockerfile` | Container image (Python 3.11, voice deps) |
-| `entrypoint.sh` | Decodes `GOOGLE_SA_JSON_B64` → file, then runs `main.py` |
+| `entrypoint.sh` | Decodes `GOOGLE_SA_JSON_B64` → file, then runs `main.py`; degrades gracefully if decode fails |
 | `.dockerignore` | Excludes secrets, DB, tests from image build context |
-| `.github/workflows/deploy.yml` | CI tests + rsync + build + restart |
+| `.github/workflows/deploy.yml` | CI tests + git pull + build + restart |
 | `deploy/setup-vm.sh` | One-time VM setup |
 | `deploy/env.snoopy.example` | Secrets template for the VM |
 
@@ -49,7 +50,7 @@ Repo → **Settings → Secrets and variables → Actions → New repository sec
 | `OCI_VM_USER` | `opc` |
 | `OCI_SSH_PRIVATE_KEY` | Full content of deploy private key (`cat ~/.ssh/oci_deploy_key`) |
 
-Three secrets total — that's it.
+Three secrets total. `GITHUB_TOKEN` is auto-provided by GitHub Actions — no extra secret needed for git pull.
 
 ---
 
@@ -58,13 +59,6 @@ Three secrets total — that's it.
 ### 3a. SSH into VM and create secrets file
 
 ```bash
-ssh opc@<YOUR_VM_PUBLIC_IP>
-```
-
-Copy the example and fill in values:
-
-```bash
-# Copy deploy/env.snoopy.example from your local machine
 scp deploy/env.snoopy.example opc@<YOUR_VM_PUBLIC_IP>:~/.env.snoopy
 ssh opc@<YOUR_VM_PUBLIC_IP>
 nano ~/.env.snoopy
@@ -86,10 +80,15 @@ base64 -w 0 <YOUR_SERVICE_ACCOUNT_JSON_FILE>
 ```
 
 Paste output as `GOOGLE_SA_JSON_B64=<BASE64_OUTPUT>` in `~/.env.snoopy`.
+If Google Calendar is not needed, leave `GOOGLE_SA_JSON_B64` commented out.
 
-### 3b. Run setup script
+### 3b. Install git (OL9 does not ship with git)
 
-From your local machine (pass your GitHub repo URL — public repo shown; for private repo add your token):
+```bash
+ssh opc@<YOUR_VM_PUBLIC_IP> "sudo dnf install -y git"
+```
+
+### 3c. Run setup script
 
 ```bash
 ssh opc@<YOUR_VM_PUBLIC_IP> bash -s -- https://github.com/<YOUR_USERNAME>/<YOUR_REPO>.git \
@@ -105,17 +104,16 @@ ssh opc@<YOUR_VM_PUBLIC_IP> bash -s -- https://<YOUR_GITHUB_USERNAME>:<YOUR_PAT>
 
 The setup script auto-detects OL version:
 
-**OL8** — generates systemd unit from a running container (`podman generate systemd --new`), writes to `~/.config/systemd/user/snoopy-home.service`.
+**OL8** — generates systemd unit from a running container (`podman generate systemd --new`), writes to `~/.config/systemd/user/snoopy-home.service`. Runs `systemctl --user enable --now snoopy-home`.
 
-**OL9** — writes a Quadlet file to `~/.config/containers/systemd/snoopy-home.container`; no need to start a container first.
+**OL9** — writes a Quadlet file to `~/.config/containers/systemd/snoopy-home.container`; no container needed first. Runs `systemctl --user start snoopy-home` (Quadlets are auto-enabled via `WantedBy=default.target`).
 
-Both paths then run `systemctl --user enable --now snoopy-home` and `loginctl enable-linger opc`.
+Both paths run `loginctl enable-linger opc` so the service survives logout and reboots.
 
-### 3c. Verify
+### 3d. Verify
 
 ```bash
-systemctl --user status snoopy-home
-journalctl --user -u snoopy-home -f
+ssh opc@<YOUR_VM_PUBLIC_IP> "systemctl --user status snoopy-home --no-pager"
 ```
 
 ---
@@ -128,7 +126,7 @@ Push to `main` triggers:
 push to main
   → test        unit + SQLite integration tests (GitHub-hosted runner, no API calls)
   → deploy      SSH into VM
-                → git pull (authenticated via secrets.GITHUB_TOKEN, no extra secret needed)
+                → git pull (authenticated via secrets.GITHUB_TOKEN)
                 → podman build -t snoopy-home:latest .
                 → systemctl --user restart snoopy-home
                 → podman image prune -f
@@ -142,12 +140,123 @@ PRs and non-main branches run `test` only — no deploy.
 
 | Task | Command (on VM) |
 |---|---|
-| Live logs | `journalctl --user -u snoopy-home -f` |
+| Live bot logs | `sudo journalctl CONTAINER_NAME=systemd-snoopy-home -f` |
+| Last 50 bot log lines | `sudo journalctl CONTAINER_NAME=systemd-snoopy-home -n 50 --no-pager` |
+| Lifecycle events (start/stop) | `sudo journalctl _SYSTEMD_USER_UNIT=snoopy-home.service -n 20 --no-pager` |
+| Service status | `systemctl --user status snoopy-home --no-pager` |
 | Restart | `systemctl --user restart snoopy-home` |
 | Stop | `systemctl --user stop snoopy-home` |
-| Shell into container | `podman exec -it snoopy-home sh` |
-| Inspect SQLite | `podman run --rm -v snoopy-data:/data alpine sqlite3 /data/snoopy_home.db` |
-| Rebuild manually | `cd ~/snoopy_home && podman build -t snoopy-home:latest . && systemctl --user restart snoopy-home` |
+| Shell into container (OL9) | `podman exec -it systemd-snoopy-home sh` |
+| Shell into container (OL8) | `podman exec -it snoopy-home sh` |
+| Run bot manually (debug) | `podman run --rm -it -v snoopy-data:/data --env-file ~/.env.snoopy -e PYTHONUNBUFFERED=1 localhost/snoopy-home:latest` |
+| Rebuild manually | `cd ~/snoopy_home && git pull && podman build -t snoopy-home:latest . && systemctl --user restart snoopy-home` |
+
+---
+
+## SQLite database
+
+DB lives in the `snoopy-data` Podman volume:
+
+```
+/home/opc/.local/share/containers/storage/volumes/snoopy-data/_data/snoopy_home.db
+```
+
+Inspect live:
+```bash
+sqlite3 /home/opc/.local/share/containers/storage/volumes/snoopy-data/_data/snoopy_home.db
+```
+
+Replace with a local DB (stop bot first):
+```bash
+systemctl --user stop snoopy-home
+scp snoopy_home.db opc@<YOUR_VM_PUBLIC_IP>:/home/opc/.local/share/containers/storage/volumes/snoopy-data/_data/snoopy_home.db
+ssh opc@<YOUR_VM_PUBLIC_IP> "systemctl --user start snoopy-home"
+```
+
+---
+
+## Debugging
+
+**1. Live logs (service running normally)**
+```bash
+sudo journalctl CONTAINER_NAME=systemd-snoopy-home -f
+```
+
+Two journal filters exist — use the right one:
+
+| Filter | Shows |
+|---|---|
+| `CONTAINER_NAME=systemd-snoopy-home` | Python app stdout/stderr (bot logs) |
+| `_SYSTEMD_USER_UNIT=snoopy-home.service` | Podman lifecycle events (start/stop/die) |
+
+Note: `journalctl --user` does NOT work on OL9 — Podman Quadlets write to the system journal. Always use `sudo journalctl`.
+
+`Environment=PYTHONUNBUFFERED=1` in the Quadlet file is required — without it Python buffers stdout and logs never reach journald.
+
+**2. Debug mode — foreground with live output**
+
+Stop the service, then run the container interactively. All stdout/stderr prints directly to your terminal in real time.
+
+```bash
+systemctl --user stop snoopy-home
+
+podman run --rm -it \
+  -v snoopy-data:/data \
+  --env-file ~/.env.snoopy \
+  -e PYTHONUNBUFFERED=1 \
+  localhost/snoopy-home:latest
+```
+
+- `--rm -it` — foreground, terminal attached, Ctrl+C to stop
+- `-e PYTHONUNBUFFERED=1` — forces Python to flush logs immediately instead of buffering
+
+Restore service when done:
+```bash
+systemctl --user start snoopy-home
+```
+
+**3. Bypass entrypoint, run Python directly**
+
+Skips `entrypoint.sh` (base64 decode, Google SA setup) and runs `main.py` directly. Useful when `entrypoint.sh` itself is the failure point.
+
+```bash
+systemctl --user stop snoopy-home
+
+podman run --rm -it \
+  -v snoopy-data:/data \
+  --env-file ~/.env.snoopy \
+  -e PYTHONUNBUFFERED=1 \
+  --entrypoint python \
+  localhost/snoopy-home:latest -u main.py
+```
+
+**4. Shell into running container**
+```bash
+podman exec -it systemd-snoopy-home sh   # OL9
+podman exec -it snoopy-home sh           # OL8
+```
+
+**5. Verify Google SA JSON base64 is valid**
+```bash
+python3 -c "
+import base64, json
+for line in open('/home/opc/.env.snoopy'):
+    if line.startswith('GOOGLE_SA_JSON_B64='):
+        val = line.split('=',1)[1].strip()
+        try:
+            json.loads(base64.b64decode(val))
+            print('OK')
+        except Exception as e:
+            print('FAIL:', e)
+"
+```
+
+**6. Restart and watch logs**
+```bash
+systemctl --user reset-failed snoopy-home 2>/dev/null; \
+systemctl --user restart snoopy-home && \
+sudo journalctl CONTAINER_NAME=systemd-snoopy-home -f
+```
 
 ---
 
@@ -162,8 +271,9 @@ PRs and non-main branches run `test` only — no deploy.
 
 ## Architecture notes
 
-- **No OCIR, no registry** — image built locally on VM from rsync'd source.
+- **No OCIR, no registry** — image built locally on VM from git-pulled source.
 - **No Docker daemon** — Podman is daemonless; each container is a direct child process of systemd.
-- **Restart policy** — handled by `systemctl --user enable` + `loginctl enable-linger opc`.
-- **SQLite persistence** — `snoopy-data` Podman volume, mounted at `/data` inside container.
-- **Google SA JSON** — `entrypoint.sh` decodes `GOOGLE_SA_JSON_B64` env var to `/app/service_account.json` at container start; no file mount needed.
+- **Restart policy** — handled by `systemctl --user enable` (OL8) / `WantedBy=default.target` (OL9) + `loginctl enable-linger opc`.
+- **SQLite persistence** — `snoopy-data` Podman volume at `/home/opc/.local/share/containers/storage/volumes/snoopy-data/_data/`, mounted at `/data` inside container.
+- **Google SA JSON** — `entrypoint.sh` decodes `GOOGLE_SA_JSON_B64` to `/app/service_account.json` at container start; degrades gracefully if decode fails (bot starts without Calendar).
+- **OL9 container name** — Quadlet prefixes container name with `systemd-`, so it becomes `systemd-snoopy-home` (not `snoopy-home`).
