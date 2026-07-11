@@ -71,7 +71,12 @@ fi
 
 # ── 5. Enable and start ───────────────────────────────────────────────────────
 systemctl --user daemon-reload
-systemctl --user enable --now snoopy-home
+if [[ "$OL_VER" == "8" ]]; then
+    systemctl --user enable --now snoopy-home
+elif [[ "$OL_VER" == "9" ]]; then
+    # Quadlet units are auto-enabled via WantedBy=default.target — just start
+    systemctl --user start snoopy-home
+fi
 
 # ── 6. Linger: keeps user services alive after logout / on reboot ─────────────
 loginctl enable-linger opc
