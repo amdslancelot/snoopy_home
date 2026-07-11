@@ -1,0 +1,15 @@
+.env
+.env.backup
+*.db
+*.json
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+env
+tests/
+.git
+.gitignore
+.pytest_cache
+deploy/

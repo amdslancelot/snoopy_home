@@ -1,0 +1,52 @@
+name: CI / Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── 1. Unit + DB integration tests (fast, no API calls) ──────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt -r requirements-test.txt
+
+      - name: Run tests
+        run: pytest tests/unit/ tests/integration/test_database.py -v
+        env:
+          DISCORD_TOKEN: test-discord-token
+          GEMINI_API_KEY: test-gemini-api-key
+
+  # ── 2. SSH → git pull → build → restart (main branch only) ──────────────────
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pull code and redeploy
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        with:
+          host: ${{ secrets.OCI_VM_HOST }}
+          username: ${{ secrets.OCI_VM_USER }}
+          key: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+          envs: GH_TOKEN,GH_REPO
+          script: |
+            cd ~/snoopy_home
+            git pull https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git main
+            podman build -t snoopy-home:latest .
+            systemctl --user restart snoopy-home
+            podman image prune -f
