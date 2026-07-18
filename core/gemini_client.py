@@ -36,8 +36,21 @@ from google.genai import types
 
 from config import settings
 from core.observability import get_logger, metrics
+from core.tools.registry import ToolContext, ToolRegistry
+from core.tools.registry import registry as tool_registry
 
 log = get_logger("gemini")
+
+
+def _to_plain(obj):
+    """Deep-convert protobuf Map/Repeated composites in tool-call args to plain JSON types."""
+    if isinstance(obj, dict) or (hasattr(obj, "keys") and hasattr(obj, "__getitem__")):
+        return {str(k): _to_plain(obj[k]) for k in obj.keys()}
+    if isinstance(obj, (list, tuple)) or (
+        hasattr(obj, "__iter__") and not isinstance(obj, (str, bytes))
+    ):
+        return [_to_plain(v) for v in obj]
+    return obj
 
 # ── Static system prompt ──────────────────────────────────────────────────────
 # Must exceed 4 096 tokens (Gemini context-cache minimum).
@@ -84,7 +97,7 @@ _PERSONALITY_PROMPTS: dict[str, str] = {
     ),
 }
 
-_SYSTEM_PROMPT_STATIC = (
+_PROMPT_SECTIONS_123 = (
     "═══════════════════════════════════════════════════════════\n"
     "SECTION 1 — CAPABILITIES\n"
     "═══════════════════════════════════════════════════════════\n"
@@ -155,6 +168,11 @@ _SYSTEM_PROMPT_STATIC = (
     "Short replies  : no markdown headers; use headers only for multi-section answers.\n"
     "Mentions       : use Discord @username format when referencing household members.\n"
     "\n"
+)
+
+# Section 4, legacy variant: the regex-extracted <action>{JSON}</action>
+# protocol. Used only when settings.action_protocol == "legacy".
+_PROMPT_SECTION4_LEGACY = (
     "═══════════════════════════════════════════════════════════\n"
     "SECTION 4 — STRUCTURED ACTION PROTOCOL\n"
     "═══════════════════════════════════════════════════════════\n"
@@ -379,6 +397,52 @@ _SYSTEM_PROMPT_STATIC = (
     "  {\"type\":\"create_reminder\",\"target_user\":null,\"message\":\"Take your medication\",\"datetime\":\"2024-06-01T21:00:00\",\"recurring\":false,\"cron\":null,\"voice\":true}\n"
     "  </action>\n"
     "\n"
+)
+
+# Section 4, tools variant: behavioral rules for native function calling.
+# The schemas themselves travel as FunctionDeclarations (core/tools/), so
+# this section is ~85% smaller than the legacy protocol spec.
+_PROMPT_SECTION4_TOOLS = (
+    "═══════════════════════════════════════════════════════════\n"
+    "SECTION 4 — USING YOUR TOOLS\n"
+    "═══════════════════════════════════════════════════════════\n"
+    "\n"
+    "You have function tools for every data operation. Your text reply alone\n"
+    "changes nothing — the backend acts only through tool calls.\n"
+    "\n"
+    "- Write tools (create_reminder, create_chore, complete_chore,\n"
+    "  cancel_reminder, create/update/delete_calendar_event, speak_in_voice,\n"
+    "  update_profile): call the tool, then confirm in one sentence based on\n"
+    "  the tool result. If the result contains an error, say briefly what\n"
+    "  went wrong — never claim success.\n"
+    "- NEVER say 'Done', 'Added', 'Cancelled', or any completion claim\n"
+    "  unless the matching tool call happened in this turn and returned ok.\n"
+    "  A confirmation without a tool call is a lie — the backend did nothing.\n"
+    "- Read tools (list_reminders, list_chores, list_todos,\n"
+    "  get_member_profile, list_calendar_events, chore_stats): call them to\n"
+    "  ground any answer about current state — never guess or invent data.\n"
+    "- 'Remind <who> ... at/in <time>' is ALWAYS create_reminder: the time\n"
+    "  expression is the trigger, never part of the message content.\n"
+    "- target_user '@everyone' when the user says us / everyone / the gang /\n"
+    "  this channel. Omit target_user for the message author.\n"
+    "- Relays ('tell X that Y', 'let X know Y', 'pass on to X') are plain\n"
+    "  text replies addressed to that person ('@wife — heads up: ...') with\n"
+    "  NO tool call — even when the relayed information mentions a time.\n"
+    "  Only the word 'remind' or an explicit future trigger makes it\n"
+    "  create_reminder.\n"
+    "    'let Bob know the plumber comes at 2 pm' →\n"
+    "        reply now: '@Bob — heads up: the plumber comes at 2 pm today.'\n"
+    "        (the 2 pm is information being passed on, not a trigger)\n"
+    "    'remind Bob at 2 pm about the plumber' → create_reminder.\n"
+    "- update_profile whenever a member shares a personal fact; send only\n"
+    "  the keys being learned — the backend merges.\n"
+    "- Ambiguous time ('remind me later'): ask one clarifying question\n"
+    "  instead of calling a tool with a guessed time.\n"
+    "- Independent requests in one message may use several tool calls.\n"
+    "\n"
+)
+
+_PROMPT_SECTIONS_567 = (
     "═══════════════════════════════════════════════════════════\n"
     "SECTION 5 — CRON EXPRESSION REFERENCE\n"
     "═══════════════════════════════════════════════════════════\n"
@@ -573,14 +637,17 @@ _SYSTEM_PROMPT_STATIC = (
     "  rather than silently failing.\n"
     "- Conflicting schedule: point out duplicates before creating them.\n"
     "- Calendar actions (create_calendar_event, update_calendar_event, delete_calendar_event):\n"
-    "  you MUST emit the action block. The backend performs the actual API call — your text\n"
-    "  reply alone does nothing. Never say 'I've added/updated/deleted' without the action block.\n"
+    "  you MUST perform the corresponding action (tool call / action block). The backend does\n"
+    "  the actual API call — text alone does nothing. Never claim an event was changed without it.\n"
     "- Outside capabilities (web browsing, smart home control beyond calendar/voice): say so briefly.\n"
     "- Never invent data. If you don't know a member's timezone, ask.\n"
     "- Never share one member's private messages without being explicitly asked.\n"
     "\n"
     "Default household timezone: " + settings.timezone + "\n"
 )
+
+_SYSTEM_PROMPT_STATIC = _PROMPT_SECTIONS_123 + _PROMPT_SECTION4_LEGACY + _PROMPT_SECTIONS_567
+_SYSTEM_PROMPT_TOOLS = _PROMPT_SECTIONS_123 + _PROMPT_SECTION4_TOOLS + _PROMPT_SECTIONS_567
 
 _HOUSEHOLD_TEMPLATE = """
 ## Household Members
@@ -657,7 +724,12 @@ class GeminiClient:
         intro = _PERSONALITY_PROMPTS.get(
             settings.bot_personality, _PERSONALITY_PROMPTS["default"]
         )
-        return intro + _SYSTEM_PROMPT_STATIC + self._household_context
+        static = (
+            _SYSTEM_PROMPT_TOOLS
+            if settings.action_protocol == "tools"
+            else _SYSTEM_PROMPT_STATIC
+        )
+        return intro + static + self._household_context
 
     async def _ensure_cache(self, model: str):
         handle = self._caches.setdefault(model, _CacheHandle())
@@ -667,16 +739,22 @@ class GeminiClient:
         system_prompt = self._full_system_prompt()
         loop = asyncio.get_running_loop()
 
+        cache_kwargs: dict = {
+            "display_name": "snoopy_" + model.replace("/", "_").replace("-", "_"),
+            "system_instruction": system_prompt,
+            "ttl": str(settings.cache_ttl_seconds) + "s",
+        }
+        if settings.action_protocol == "tools":
+            # Tool declarations are baked INTO the cache: a request that uses
+            # cached_content may not also pass tools/system_instruction.
+            cache_kwargs["tools"] = [tool_registry.as_tool()]
+
         try:
             cache = await loop.run_in_executor(
                 None,
                 lambda: self._client.caches.create(
                     model=model,
-                    config=types.CreateCachedContentConfig(
-                        display_name="snoopy_" + model.replace("/", "_").replace("-", "_"),
-                        system_instruction=system_prompt,
-                        ttl=str(settings.cache_ttl_seconds) + "s",
-                    ),
+                    config=types.CreateCachedContentConfig(**cache_kwargs),
                 ),
             )
             handle.name = cache.name
@@ -756,6 +834,115 @@ class GeminiClient:
         raw = response.text or ""
         display_text, actions = self._extract_actions(raw)
         return display_text.strip(), actions
+
+    async def generate_with_tools(
+        self,
+        messages: list[dict],
+        model: str,
+        ctx: ToolContext,
+        use_cache: bool = True,
+        max_iterations: int = 5,
+        registry: Optional[ToolRegistry] = None,
+    ) -> tuple[str, list[dict]]:
+        """Native function-calling loop.
+
+        Generates with the tool declarations attached (via the server-side
+        cache when valid, else inline), executes any function calls through
+        the registry, feeds results back, and repeats until the model
+        replies with plain text or the iteration cap is hit.
+
+        Returns (display_text, executed_calls); executed_calls are canonical
+        dicts {"type": tool_name, **args} — the same shape the legacy
+        protocol produced, so evals and metrics are directly comparable.
+        """
+        reg = registry or tool_registry
+        stamped = self._stamp_date(messages)
+        contents = [
+            types.Content(role=m["role"], parts=[types.Part(text=m["content"])])
+            for m in stamped
+        ]
+
+        executed: list[dict] = []
+        loop = asyncio.get_running_loop()
+        response = None
+
+        for _ in range(max_iterations):
+            gen_kwargs: dict = {}
+            if use_cache:
+                await self._ensure_cache(model)
+                handle = self._caches.get(model)
+                if handle and handle.valid():
+                    gen_kwargs["cached_content"] = handle.name
+            cached = "cached_content" in gen_kwargs
+            metrics.cache_events_total.labels(event="hit" if cached else "uncached").inc()
+
+            if cached:
+                config = types.GenerateContentConfig(**gen_kwargs)  # tools live in the cache
+            else:
+                config = types.GenerateContentConfig(
+                    system_instruction=self._full_system_prompt(),
+                    tools=[reg.as_tool()],
+                )
+
+            start = time.perf_counter()
+            try:
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self._client.models.generate_content(
+                        model=model, contents=contents, config=config
+                    ),
+                )
+            except Exception:
+                metrics.llm_requests_total.labels(model=model, status="error").inc()
+                raise
+
+            duration = time.perf_counter() - start
+            metrics.llm_request_duration_seconds.labels(model=model).observe(duration)
+            metrics.llm_requests_total.labels(model=model, status="success").inc()
+            usage = getattr(response, "usage_metadata", None)
+            cost = metrics.record_llm_usage(model, usage) if usage else 0.0
+
+            candidate = response.candidates[0] if response.candidates else None
+            parts = list(candidate.content.parts or []) if candidate and candidate.content else []
+            calls = [p.function_call for p in parts if getattr(p, "function_call", None)]
+            log.info(
+                "llm_response",
+                model=model,
+                duration_s=round(duration, 2),
+                cached=cached,
+                cost_usd=round(cost, 6),
+                tool_calls=[c.name for c in calls],
+            )
+
+            if not calls:
+                return (response.text or "").strip(), executed
+
+            contents.append(candidate.content)
+            response_parts = []
+            for call in calls:
+                args = _to_plain(call.args or {})
+                try:
+                    result = await reg.execute(call.name, args, ctx)
+                    status = "success"
+                except Exception as exc:
+                    log.exception("tool_failed", tool=call.name)
+                    result = {"ok": False, "error": str(exc)}
+                    status = "error"
+                metrics.action_executions_total.labels(action=call.name, status=status).inc()
+                executed.append({"type": call.name, **args})
+                response_parts.append(
+                    types.Part.from_function_response(name=call.name, response=result)
+                )
+            contents.append(types.Content(role="tool", parts=response_parts))
+
+        log.warning("tool_loop_exhausted", model=model, iterations=max_iterations)
+        text = ""
+        if response is not None:
+            try:
+                text = (response.text or "").strip()
+            except Exception:
+                text = ""
+        return text or "Done!", executed
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

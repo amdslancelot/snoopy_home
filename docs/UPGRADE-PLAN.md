@@ -51,7 +51,8 @@ Phase order rationale: monitoring first (zero risk, instruments everything after
 
 **Done when:** bot end-to-end on local podman Postgres; CI green against service container; data-move rehearsed on a prod-DB copy with matching row counts; `aiosqlite` gone.
 
-## [ ] Phase 4 — Native function calling (~800 LOC, net-negative prompt)
+## [x] Phase 4 — Native function calling (~800 LOC, net-negative prompt)
+> Landed. Eval: 53/55 (96.4%), judge 4.53 — at legacy parity plus read grounding. Live tests confirm cache-with-tools. Discord smoke pending user verification (running a second local bot would double-answer the production token).
 
 **New:** `core/tools/registry.py` (`ToolSpec` = name + `types.FunctionDeclaration` + async executor; `ToolContext` = channel_id, guild, author, reply hook), `core/tools/declarations.py` (15 tools: 9 writes + reads `list_reminders`, `list_chores`, `list_todos`, `get_member_profile`, `list_calendar_events`, `chore_stats`), migration `002_chore_completions.sql` (completion log so "who did most chores last week" is answerable), read queries in `storage/repositories.py`, `tests/unit/test_tool_loop.py`, `tests/unit/test_registry.py`, `docs/function-calling.md`.
 

@@ -152,13 +152,42 @@ class ChoreRepository:
         )
         return [dict(r) for r in rows]
 
-    async def complete_by_name(self, name: str) -> int:
-        """Mark a chore complete by (case-insensitive) name. Returns rows updated."""
-        result = await pool().execute(
-            "UPDATE chore_tasks SET last_completed=now() WHERE lower(name)=lower($1) AND is_active",
+    async def complete_by_name(self, name: str, completed_by: Optional[int] = None) -> int:
+        """Mark a chore complete by (case-insensitive) name and log the completion.
+
+        Returns the number of chores matched (0 = nothing by that name).
+        """
+        rows = await pool().fetch(
+            """UPDATE chore_tasks SET last_completed=now()
+               WHERE lower(name)=lower($1) AND is_active
+               RETURNING id""",
             name,
         )
-        return int(result.split()[-1])
+        for r in rows:
+            await pool().execute(
+                "INSERT INTO chore_completions (chore_id, completed_by) VALUES ($1, $2)",
+                r["id"], completed_by,
+            )
+        return len(rows)
+
+    async def stats(self, days: int = 7) -> list[dict]:
+        """Completion counts per member over the last `days` days."""
+        rows = await pool().fetch(
+            """SELECT COALESCE(m.username, cc.completed_by::text, 'unknown') AS member,
+                      COUNT(*) AS completions,
+                      array_agg(DISTINCT c.name) AS chores
+               FROM chore_completions cc
+               JOIN chore_tasks c ON c.id = cc.chore_id
+               LEFT JOIN household_members m ON m.discord_id = cc.completed_by
+               WHERE cc.completed_at > now() - make_interval(days => $1)
+               GROUP BY 1
+               ORDER BY completions DESC""",
+            days,
+        )
+        return [
+            {"member": r["member"], "completions": r["completions"], "chores": list(r["chores"])}
+            for r in rows
+        ]
 
     async def find_active(self, channel_id: int) -> list[tuple[int, str]]:
         rows = await pool().fetch(

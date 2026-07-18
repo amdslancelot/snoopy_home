@@ -82,6 +82,15 @@ def match_value(spec, actual, now: datetime) -> tuple[bool, str]:
         ok = spec.lower() == actual.lower()
         return ok, "" if ok else "%r != %r" % (actual, spec)
 
+    if spec is False:
+        # Function calling omits optional params entirely where the legacy
+        # protocol emitted explicit false — absent means false.
+        ok = not actual
+        return ok, "" if ok else "%r is truthy, expected false/absent" % (actual,)
+    if spec is True:
+        ok = bool(actual)
+        return ok, "" if ok else "%r is falsy, expected true" % (actual,)
+
     ok = spec == actual
     return ok, "" if ok else "%r != %r" % (actual, spec)
 
@@ -95,9 +104,22 @@ def _match_action(expected: dict, actual: dict, now: datetime) -> list[str]:
     return problems
 
 
-def score_case(case: dict, tier: str, intent: str, actions: list[dict], now: datetime) -> CaseScore:
+def score_case(
+    case: dict,
+    tier: str,
+    intent: str,
+    actions: list[dict],
+    now: datetime,
+    reads: list[str] | None = None,
+    check_reads: bool = False,
+) -> CaseScore:
     expected = case.get("expected", {})
     failures: list[str] = []
+
+    if check_reads:
+        for want in expected.get("expect_reads", []):
+            if want not in (reads or []):
+                failures.append(f"expected read tool not called: {want}")
 
     if "tier" in expected and tier != expected["tier"]:
         failures.append(f"tier: got {tier!r}, expected {expected['tier']!r}")
@@ -105,13 +127,18 @@ def score_case(case: dict, tier: str, intent: str, actions: list[dict], now: dat
         failures.append(f"intent: got {intent!r}, expected {expected['intent']!r}")
 
     expected_actions = expected.get("actions", [])
-    actual_types = sorted(a.get("type", "") for a in actions)
+    # optional_actions: incidental writes that may accompany the expected set
+    # without failing it (e.g. update_profile when a message mentions a
+    # personal fact in passing). Forbidden actions are still enforced.
+    optional = set(expected.get("optional_actions", []))
+    considered = [a for a in actions if a.get("type") not in optional]
+    actual_types = sorted(a.get("type", "") for a in considered)
     expected_types = sorted(a["type"] for a in expected_actions)
 
     if expected_types != actual_types:
         failures.append(f"action types: got {actual_types}, expected {expected_types}")
     else:
-        remaining = list(actions)
+        remaining = list(considered)
         for exp in expected_actions:
             candidate = next((a for a in remaining if a.get("type") == exp["type"]), None)
             remaining.remove(candidate)

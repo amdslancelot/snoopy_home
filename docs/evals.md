@@ -88,6 +88,18 @@ Full report: `evals/results/baseline-legacy.md`.
 This baseline is the bar the Phase-4 function-calling migration must meet or
 beat before the legacy protocol is deleted.
 
+## Tools protocol — post-migration (2026-07-18)
+
+Full report: `evals/results/tools-protocol.md`. Deterministic 92.7–98.2%
+across runs (committed judged run: **53/55, 96.4%**, judge **4.53/5**) —
+within run-to-run variance of the legacy baseline, with read-grounding the
+legacy protocol could not do at all. The migration iterations the harness
+drove (relay regression, omitted `target_user`, claim-without-call) are
+documented in `docs/function-calling.md`; read-tool expectations are scored
+via each case's `expect_reads` (only for data genuinely absent from the
+system-prompt household context — reminders and calendar), and incidental
+profile-learning is absorbed by `optional_actions`.
+
 ## Re-pinning router expectations
 
 `tier`/`intent` in the dataset pin the *current* analyzer behavior

@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # Bot personality ("default" = neutral assistant, "snoopy" = Snoopy the beagle)
     bot_personality: str = "default"
 
+    # LLM action protocol: "tools" = Gemini native function calling (default),
+    # "legacy" = the regex-extracted <action>{JSON}</action> protocol.
+    # Rollback switch for one release; the legacy path is deleted after that.
+    action_protocol: str = "tools"
+
     # Observability
     metrics_port: int = 8080
     log_format: str = "console"  # "console" (dev) | "json" (production)

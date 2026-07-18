@@ -23,10 +23,14 @@ import pathlib
 import sys
 from datetime import datetime
 
+from config import settings
 from core.gemini_client import gemini_client
 from core.llm_router import router
 from core.message_parser import ComplexityAnalyzer
-from evals.adapters import canonicalize_actions
+from core.tools import read_tools
+from core.tools.declarations import DECLARATIONS
+from core.tools.registry import ToolContext, registry
+from evals.adapters import split_actions
 from evals.report import render_markdown, to_json
 from evals.scorers.deterministic import score_case
 from evals.scorers.judge import Judge
@@ -34,6 +38,23 @@ from evals.scorers.judge import Judge
 DEFAULT_DATASET = pathlib.Path(__file__).parent / "dataset" / "golden.jsonl"
 
 _analyzer = ComplexityAnalyzer()
+
+
+async def _stub_executor(args: dict, ctx) -> dict:
+    return {"ok": True}
+
+
+def _ensure_registry():
+    """Populate the tool registry without importing bot/ (no Discord needed).
+
+    Executors never run — eval contexts are dry_run — but the declarations
+    must exist so the API request advertises the full toolset.
+    """
+    if "list_chores" not in registry.names():
+        read_tools.register(registry)
+    for name, decl in DECLARATIONS.items():
+        if name not in registry.names():
+            registry.register(decl, _stub_executor)
 
 
 def load_dataset(path: pathlib.Path) -> list[dict]:
@@ -50,12 +71,22 @@ async def run_case(case: dict, sem: asyncio.Semaphore, use_cache: bool, judge: J
     model = router.select_model(complexity)
     messages = list(case.get("history", [])) + [{"role": "user", "content": case["user_message"]}]
 
-    reply, actions, error = "", [], None
+    reply, actions, reads, error = "", [], [], None
     async with sem:
         for attempt in (1, 2):
             try:
-                reply, raw_actions = await gemini_client.generate(messages, model, use_cache=use_cache)
-                actions = canonicalize_actions(raw_actions)
+                if settings.action_protocol == "tools":
+                    ctx = ToolContext(
+                        channel_id=0, author_id=0, author_name="EvalUser", dry_run=True
+                    )
+                    reply, raw_actions = await gemini_client.generate_with_tools(
+                        messages, model, ctx, use_cache=use_cache
+                    )
+                else:
+                    reply, raw_actions = await gemini_client.generate(
+                        messages, model, use_cache=use_cache
+                    )
+                actions, reads = split_actions(raw_actions)
                 error = None
                 break
             except Exception as exc:  # transient 429/5xx: one retry with backoff
@@ -74,7 +105,15 @@ async def run_case(case: dict, sem: asyncio.Semaphore, use_cache: bool, judge: J
             "failures": [f"pipeline error: {error}"],
         }
     else:
-        score = score_case(case, complexity.tier.value, complexity.detected_intent, actions, now)
+        score = score_case(
+            case,
+            complexity.tier.value,
+            complexity.detected_intent,
+            actions,
+            now,
+            reads=reads,
+            check_reads=settings.action_protocol == "tools",
+        )
         result = {
             "case_id": case["id"],
             "tags": case.get("tags", []),
@@ -83,6 +122,7 @@ async def run_case(case: dict, sem: asyncio.Semaphore, use_cache: bool, judge: J
             "tier": complexity.tier.value,
             "intent": complexity.detected_intent,
             "actions": actions,
+            "reads": reads,
             "reply": reply,
             "passed": score.passed,
             "failures": score.failures,
@@ -115,9 +155,15 @@ async def amain(args) -> int:
         print("no cases selected", file=sys.stderr)
         return 2
 
+    if settings.action_protocol == "tools":
+        _ensure_registry()
+
     judge = Judge() if args.judge else None
     sem = asyncio.Semaphore(args.concurrency)
-    print(f"Running {len(cases)} case(s) — judge={'on' if judge else 'off'} cache={not args.no_cache}")
+    print(
+        f"Running {len(cases)} case(s) — protocol={settings.action_protocol} "
+        f"judge={'on' if judge else 'off'} cache={not args.no_cache}"
+    )
 
     results = await asyncio.gather(
         *(run_case(c, sem, use_cache=not args.no_cache, judge=judge) for c in cases)
@@ -128,6 +174,7 @@ async def amain(args) -> int:
     rate = passed / len(results)
     meta = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
+        "protocol": settings.action_protocol,
         "dataset": str(dataset_path),
         "cases": len(results),
         "passed": passed,

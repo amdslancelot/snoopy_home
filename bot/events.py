@@ -14,6 +14,9 @@ from core.gemini_client import gemini_client
 from core.llm_router import router
 from core.message_parser import ComplexityAnalyzer
 from core.observability import get_logger, metrics
+from core.tools import read_tools
+from core.tools.declarations import DECLARATIONS
+from core.tools.registry import ToolContext, registry
 from integrations.google_calendar import google_calendar
 from integrations.voice_tts import speak_in_channel
 from storage.repositories import chore_repo, member_repo, todo_repo
@@ -89,22 +92,34 @@ async def _handle(message: discord.Message, text: str):
     context_manager.add_user(channel_id, text, username)
 
     try:
-        reply_text, actions = await gemini_client.generate(
-            context_manager.get(channel_id), model
-        )
+        if settings.action_protocol == "tools":
+            ctx = ToolContext(
+                channel_id=channel_id,
+                author_id=message.author.id,
+                author_name=username,
+                guild=message.guild,
+                source_message=message,
+            )
+            # Tool executors run inside the loop (metrics recorded there).
+            reply_text, actions = await gemini_client.generate_with_tools(
+                context_manager.get(channel_id), model, ctx
+            )
+        else:
+            reply_text, actions = await gemini_client.generate(
+                context_manager.get(channel_id), model
+            )
+            for action in actions:
+                kind = action.get("type") or "unknown"
+                try:
+                    await _execute_action(action, message)
+                    metrics.action_executions_total.labels(action=kind, status="success").inc()
+                except Exception:
+                    metrics.action_executions_total.labels(action=kind, status="error").inc()
+                    log.exception("action_failed", action=kind)
     except Exception as exc:
         log.error("generate_failed", error=str(exc))
         await message.channel.send("Sorry, I couldn't reach the AI right now. Please try again.")
         return
-
-    for action in actions:
-        kind = action.get("type") or "unknown"
-        try:
-            await _execute_action(action, message)
-            metrics.action_executions_total.labels(action=kind, status="success").inc()
-        except Exception:
-            metrics.action_executions_total.labels(action=kind, status="error").inc()
-            log.exception("action_failed", action=kind)
 
     if not reply_text and actions:
         reply_text = "Done!"
@@ -127,10 +142,7 @@ async def _execute_action(action: dict, source: discord.Message):
     elif kind == "complete_chore":
         await _do_complete_chore(action, source)
     elif kind == "cancel_reminder":
-        rid = action.get("reminder_id")
-        if rid:
-            await reminder_manager.mark_inactive(int(rid))
-            unschedule_reminder(int(rid))
+        await _do_cancel_reminder(action, source)
     elif kind == "update_profile":
         await _do_update_profile(action, source)
     elif kind == "create_calendar_event":
@@ -143,7 +155,16 @@ async def _execute_action(action: dict, source: discord.Message):
         await _do_speak_in_voice(action, source)
 
 
-async def _do_create_reminder(action: dict, source: discord.Message):
+async def _do_cancel_reminder(action: dict, source: discord.Message, notify: bool = True) -> dict:
+    rid = action.get("reminder_id")
+    if not rid:
+        return {"ok": False, "error": "missing reminder_id"}
+    await reminder_manager.mark_inactive(int(rid))
+    unschedule_reminder(int(rid))
+    return {"ok": True, "cancelled_reminder_id": int(rid)}
+
+
+async def _do_create_reminder(action: dict, source: discord.Message, notify: bool = True) -> dict:
     channel_id = source.channel.id
     creator_id = source.author.id
 
@@ -171,19 +192,21 @@ async def _do_create_reminder(action: dict, source: discord.Message):
     now_utc = datetime.utcnow()
 
     if not trigger_time:
-        await source.channel.send(
-            f"Sorry {source.author.mention}, I couldn't parse that time. "
-            "Can you be more specific? (e.g. 'tomorrow at 9 am')"
-        )
-        return
+        if notify:
+            await source.channel.send(
+                f"Sorry {source.author.mention}, I couldn't parse that time. "
+                "Can you be more specific? (e.g. 'tomorrow at 9 am')"
+            )
+        return {"ok": False, "error": f"could not parse time {raw_dt!r}; ask for an explicit time"}
 
     if trigger_time <= now_utc:
         log.warning("reminder_trigger_in_past", trigger=str(trigger_time), raw=raw_dt)
-        await source.channel.send(
-            f"Sorry {source.author.mention}, I couldn't calculate that time correctly. "
-            "Try again with an explicit time, e.g. 'remind me at 9:00 pm'."
-        )
-        return
+        if notify:
+            await source.channel.send(
+                f"Sorry {source.author.mention}, I couldn't calculate that time correctly. "
+                "Try again with an explicit time, e.g. 'remind me at 9:00 pm'."
+            )
+        return {"ok": False, "error": f"computed trigger {trigger_time} is in the past; ask for an explicit future time"}
 
     _MIN_LEAD = timedelta(seconds=10)
     if trigger_time - now_utc < _MIN_LEAD:
@@ -209,51 +232,64 @@ async def _do_create_reminder(action: dict, source: discord.Message):
         trigger=str(trigger_time),
         job_id=job_id,
     )
+    return {
+        "ok": True,
+        "reminder_id": reminder.id,
+        "fires_at_utc": trigger_time.isoformat(),
+        "recurring": is_recurring,
+    }
 
 
-async def _do_create_chore(action: dict, source: discord.Message):
+async def _do_create_chore(action: dict, source: discord.Message, notify: bool = True) -> dict:
     cron = action.get("cron")
     if not cron:
-        return
+        return {"ok": False, "error": "missing cron schedule"}
     assigned_id = await _resolve_user_id(
         action.get("assigned_to", ""), source.guild, fallback_id=None
     )
-    await chore_repo.create(
+    name = action.get("name", "Unnamed chore")
+    chore_id = await chore_repo.create(
         channel_id=source.channel.id,
-        name=action.get("name", "Unnamed chore"),
+        name=name,
         description=action.get("description", ""),
         assigned_user_id=assigned_id,
         cron_expression=cron,
     )
     await _sync_household_context()
+    return {"ok": True, "chore_id": chore_id, "name": name}
 
 
-async def _do_update_profile(action: dict, source: discord.Message):
+async def _do_update_profile(action: dict, source: discord.Message, notify: bool = True) -> dict:
     target_id = await _resolve_user_id(
         action.get("target_user", ""), source.guild, source.author.id
     )
     updates = action.get("updates") or {}
     if not updates or not target_id:
-        return
+        return {"ok": False, "error": "missing updates or unknown target user"}
     if not await member_repo.merge_profile(target_id, updates):
-        return
+        return {"ok": False, "error": "target user is not a registered household member"}
     await _sync_household_context()
+    return {"ok": True, "updated_keys": list(updates)}
 
 
-async def _do_complete_chore(action: dict, source: discord.Message):
+async def _do_complete_chore(action: dict, source: discord.Message, notify: bool = True) -> dict:
     name = action.get("name", "").strip()
     if not name:
-        return
-    await chore_repo.complete_by_name(name)
+        return {"ok": False, "error": "missing chore name"}
+    updated = await chore_repo.complete_by_name(name, source.author.id if source else None)
+    if not updated:
+        return {"ok": False, "error": f"no active chore named '{name}' — check list_chores for the exact name"}
+    return {"ok": True, "completed": name}
 
 
-async def _do_create_calendar_event(action: dict, source: discord.Message):
+async def _do_create_calendar_event(action: dict, source: discord.Message, notify: bool = True) -> dict:
     if not settings.household_calendar_id or not settings.google_service_account_json:
-        await source.channel.send(
-            "Google Calendar isn't configured yet. "
-            "Set `GOOGLE_SERVICE_ACCOUNT_JSON` and `HOUSEHOLD_CALENDAR_ID` in `.env`."
-        )
-        return
+        if notify:
+            await source.channel.send(
+                "Google Calendar isn't configured yet. "
+                "Set `GOOGLE_SERVICE_ACCOUNT_JSON` and `HOUSEHOLD_CALENDAR_ID` in `.env`."
+            )
+        return {"ok": False, "error": "Google Calendar is not configured"}
 
     raw_start = action.get("start_datetime") or ""
     raw_end = action.get("end_datetime")
@@ -261,10 +297,11 @@ async def _do_create_calendar_event(action: dict, source: discord.Message):
     end = _parse_dt(raw_end) if raw_end else None
 
     if not start:
-        await source.channel.send(
-            f"Sorry {source.author.mention}, I couldn't parse the event start time."
-        )
-        return
+        if notify:
+            await source.channel.send(
+                f"Sorry {source.author.mention}, I couldn't parse the event start time."
+            )
+        return {"ok": False, "error": f"could not parse start time {raw_start!r}"}
 
     # Resolve attendee @usernames → google_email from their profiles
     attendee_emails: list[str] = []
@@ -283,19 +320,23 @@ async def _do_create_calendar_event(action: dict, source: discord.Message):
         attendee_emails=attendee_emails,
     )
     if not ok:
-        await source.channel.send(
-            "Hmm, I couldn't create the calendar event. "
-            "Check that the service account has edit access to the household calendar."
-        )
+        if notify:
+            await source.channel.send(
+                "Hmm, I couldn't create the calendar event. "
+                "Check that the service account has edit access to the household calendar."
+            )
+        return {"ok": False, "error": "calendar API call failed"}
+    return {"ok": True, "title": action.get("title"), "invited": attendee_emails}
 
 
-async def _do_update_calendar_event(action: dict, source: discord.Message):
+async def _do_update_calendar_event(action: dict, source: discord.Message, notify: bool = True) -> dict:
     if not settings.household_calendar_id or not settings.google_service_account_json:
-        await source.channel.send(
-            "Google Calendar isn't configured yet. "
-            "Set `GOOGLE_SERVICE_ACCOUNT_JSON` and `HOUSEHOLD_CALENDAR_ID` in `.env`."
-        )
-        return
+        if notify:
+            await source.channel.send(
+                "Google Calendar isn't configured yet. "
+                "Set `GOOGLE_SERVICE_ACCOUNT_JSON` and `HOUSEHOLD_CALENDAR_ID` in `.env`."
+            )
+        return {"ok": False, "error": "Google Calendar is not configured"}
 
     title = action.get("title", "").strip()
     start = _parse_dt(action.get("start_datetime")) if action.get("start_datetime") else None
@@ -311,20 +352,24 @@ async def _do_update_calendar_event(action: dict, source: discord.Message):
         new_description=action.get("new_description") if "new_description" in action else None,
     )
     if not ok:
-        await source.channel.send(
-            f"Hmm, I couldn't find \"{title}\" on the calendar"
-            + (" around that time" if start else "")
-            + " to update it. Check the event name or time?"
-        )
+        if notify:
+            await source.channel.send(
+                f"Hmm, I couldn't find \"{title}\" on the calendar"
+                + (" around that time" if start else "")
+                + " to update it. Check the event name or time?"
+            )
+        return {"ok": False, "error": f"no calendar event matching '{title}' found to update"}
+    return {"ok": True, "title": title}
 
 
-async def _do_delete_calendar_event(action: dict, source: discord.Message):
+async def _do_delete_calendar_event(action: dict, source: discord.Message, notify: bool = True) -> dict:
     if not settings.household_calendar_id or not settings.google_service_account_json:
-        await source.channel.send(
-            "Google Calendar isn't configured yet. "
-            "Set `GOOGLE_SERVICE_ACCOUNT_JSON` and `HOUSEHOLD_CALENDAR_ID` in `.env`."
-        )
-        return
+        if notify:
+            await source.channel.send(
+                "Google Calendar isn't configured yet. "
+                "Set `GOOGLE_SERVICE_ACCOUNT_JSON` and `HOUSEHOLD_CALENDAR_ID` in `.env`."
+            )
+        return {"ok": False, "error": "Google Calendar is not configured"}
 
     title = action.get("title", "").strip()
     raw_start = action.get("start_datetime")
@@ -332,22 +377,28 @@ async def _do_delete_calendar_event(action: dict, source: discord.Message):
 
     ok = await google_calendar.delete_event(title=title, start=start)
     if not ok:
-        await source.channel.send(
-            f"Hmm, I couldn't find \"{title}\" on the calendar"
-            + (f" around that time" if start else "")
-            + ". Double-check the event name or time?"
-        )
+        if notify:
+            await source.channel.send(
+                f"Hmm, I couldn't find \"{title}\" on the calendar"
+                + (" around that time" if start else "")
+                + ". Double-check the event name or time?"
+            )
+        return {"ok": False, "error": f"no calendar event matching '{title}' found to delete"}
+    return {"ok": True, "deleted": title}
 
 
-async def _do_speak_in_voice(action: dict, source: discord.Message):
+async def _do_speak_in_voice(action: dict, source: discord.Message, notify: bool = True) -> dict:
     text = action.get("message", "").strip()
     if not text:
-        return
+        return {"ok": False, "error": "missing message"}
 
     target_id = await _resolve_user_id(
         action.get("target_user", ""), source.guild, source.author.id
     )
-    await speak_in_channel(bot, source.guild, text, target_id)
+    ok = await speak_in_channel(bot, source.guild, text, target_id)
+    if not ok:
+        return {"ok": False, "error": "could not join a voice channel to speak"}
+    return {"ok": True}
 
 
 # ── Slash commands ────────────────────────────────────────────────────────────
@@ -390,6 +441,24 @@ async def cmd_create_chore(interaction: discord.Interaction, description: str):
     model = router.select_model(complexity)
 
     try:
+        if settings.action_protocol == "tools":
+            ctx = ToolContext(
+                channel_id=interaction.channel_id,
+                author_id=interaction.user.id,
+                author_name=interaction.user.display_name,
+                guild=interaction.guild,
+                source_message=_InteractionSource(interaction),
+            )
+            reply_text, actions = await gemini_client.generate_with_tools(messages, model, ctx)
+            # The executor already created the chore; just relay the outcome.
+            if any(a.get("type") == "create_chore" for a in actions):
+                await interaction.followup.send(reply_text or "Added!")
+            else:
+                await interaction.followup.send(
+                    reply_text or "Couldn't parse a schedule from that. Try: 'vacuum living room every Saturday at 11am'",
+                    ephemeral=True,
+                )
+            return
         reply_text, actions = await gemini_client.generate(messages, model)
     except Exception as exc:
         log.error("chore_cmd_generate_failed", error=str(exc))
@@ -511,6 +580,16 @@ async def cmd_register(interaction: discord.Interaction):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+class _InteractionSource:
+    """Adapts a discord.Interaction to the (channel/author/guild) surface the
+    action handlers expect from a discord.Message."""
+
+    def __init__(self, interaction: discord.Interaction):
+        self.channel = interaction.channel
+        self.author = interaction.user
+        self.guild = interaction.guild
+
 
 async def _resolve_user_id(
     mention_str: str,
@@ -719,6 +798,38 @@ def _mention(user_id: Optional[int]) -> str:
         return ""
     user = bot.get_user(user_id)
     return user.mention if user else f"<@{user_id}>"
+
+
+# ── Tool registration (native function calling) ──────────────────────────────
+# Write executors wrap the action handlers above with notify=False: in tool
+# mode the model narrates outcomes itself from the returned result dicts.
+# Registered at import time — the same injection direction as init_scheduler,
+# so core/ never imports bot/.
+
+def _register_tools():
+    read_tools.register(registry)
+
+    def _wrap(handler):
+        async def executor(args: dict, ctx: ToolContext) -> dict:
+            return await handler(args, ctx.source_message, notify=False)
+
+        return executor
+
+    for name, handler in [
+        ("create_reminder", _do_create_reminder),
+        ("create_chore", _do_create_chore),
+        ("complete_chore", _do_complete_chore),
+        ("cancel_reminder", _do_cancel_reminder),
+        ("create_calendar_event", _do_create_calendar_event),
+        ("update_calendar_event", _do_update_calendar_event),
+        ("delete_calendar_event", _do_delete_calendar_event),
+        ("speak_in_voice", _do_speak_in_voice),
+        ("update_profile", _do_update_profile),
+    ]:
+        registry.register(DECLARATIONS[name], _wrap(handler))
+
+
+_register_tools()
 
 
 @bot.event

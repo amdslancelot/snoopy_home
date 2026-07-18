@@ -106,6 +106,42 @@ class GoogleCalendarClient:
             log.error("find_event_failed", title=title, error=str(exc))
             return None
 
+    async def list_events(self, days_ahead: int = 7) -> Optional[list[dict]]:
+        """Upcoming events in the next `days_ahead` days; None when unconfigured."""
+        service = self._get_service()
+        if not service:
+            return None
+
+        now = datetime.utcnow()
+        time_min = now.isoformat() + "Z"
+        time_max = (now + timedelta(days=days_ahead)).isoformat() + "Z"
+
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: service.events()
+                .list(
+                    calendarId=settings.household_calendar_id,
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    singleEvents=True,
+                    orderBy="startTime",
+                )
+                .execute(),
+            )
+            return [
+                {
+                    "title": e.get("summary", ""),
+                    "start": (e.get("start") or {}).get("dateTime") or (e.get("start") or {}).get("date"),
+                    "end": (e.get("end") or {}).get("dateTime") or (e.get("end") or {}).get("date"),
+                }
+                for e in result.get("items", [])
+            ]
+        except Exception as exc:
+            log.error("list_events_failed", error=str(exc))
+            return []
+
     async def create_event(
         self,
         title: str,

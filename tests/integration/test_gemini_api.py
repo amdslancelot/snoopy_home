@@ -26,7 +26,16 @@ skip_if_no_key = pytest.mark.skipif(
 
 @skip_if_no_key
 class TestGeminiAPILive:
-    """End-to-end tests against the real Gemini API (model: gemini-2.5-flash-lite)."""
+    """End-to-end tests against the real Gemini API (model: gemini-2.5-flash-lite).
+
+    These exercise the LEGACY <action> protocol (kept behind
+    ACTION_PROTOCOL=legacy for one release); the native function-calling
+    path is covered by test_gemini_tools_live.py.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _legacy_protocol(self, monkeypatch):
+        monkeypatch.setattr(_settings, "action_protocol", "legacy")
 
     @pytest.fixture
     def client(self):
