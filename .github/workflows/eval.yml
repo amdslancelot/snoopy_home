@@ -1,0 +1,50 @@
+name: Evals
+
+on:
+  schedule:
+    - cron: "0 3 * * *"          # nightly, with judge
+  workflow_dispatch:
+    inputs:
+      judge:
+        description: "Run the LLM judge as well"
+        type: boolean
+        default: true
+  pull_request:
+    types: [opened, synchronize, labeled]
+
+jobs:
+  eval:
+    # PRs only run when explicitly opted in via the 'eval' label —
+    # these are real Gemini calls with real cost.
+    if: >
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'eval')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt -r requirements-test.txt
+
+      - name: Run eval suite
+        run: |
+          JUDGE_FLAG=""
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.judge }}" = "true" ]; then
+            JUDGE_FLAG="--judge"
+          fi
+          python -m evals.runner --threshold 0.9 --output eval-report/report $JUDGE_FLAG
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DISCORD_TOKEN: eval-placeholder-token
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval-report/

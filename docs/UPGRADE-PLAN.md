@@ -12,7 +12,7 @@ Phase order rationale: monitoring first (zero risk, instruments everything after
 
 ---
 
-## [ ] Phase 1 — Monitoring (~500 LOC)
+## [x] Phase 1 — Monitoring (~500 LOC)
 
 **New:** `core/observability.py` (structlog config — JSON in prod, console dev via `LOG_FORMAT`; Prometheus metric definitions), `web/health.py` (aiohttp on the bot's event loop: `/health` = `bot.is_ready` + DB ping + `scheduler.running`; `/metrics` = Prometheus exposition), `deploy/grafana/snoopy-dashboard.json`, `docs/observability.md`, `tests/unit/test_observability.py`.
 
@@ -24,7 +24,8 @@ Phase order rationale: monitoring first (zero risk, instruments everything after
 
 **Done when:** zero `print()` remains; `curl :8080/metrics` moves during a live run; dashboard imports into Grafana; existing tests green.
 
-## [ ] Phase 2 — Eval harness (~700 LOC + dataset) — flagship
+## [x] Phase 2 — Eval harness (~700 LOC + dataset) — flagship
+> Landed. Baseline (legacy protocol): 54/55 deterministic (98.2%), judge 4.65/5 — see docs/evals.md.
 
 **New:** `evals/dataset/golden.jsonl` (~60 cases: 9 action types ×3+, read queries, chit-chat/no-action, edge cases — remind-vs-relay, ambiguous/past times, `@everyone`, voice; fields `{id, tags, history, user_message, expected:{tier, intent, actions:[{type, args_subset}], forbid_actions, reply_rubric}}`), `evals/runner.py`, `evals/scorers/deterministic.py`, `evals/scorers/judge.py`, `evals/adapters.py` (action-dict → canonical intent now; tool-call → same after Phase 4, so the golden set survives the migration unchanged), `evals/report.py`, `.github/workflows/eval.yml`, `tests/unit/test_router_eval.py`, `tests/unit/test_eval_scorers.py`, `docs/evals.md`.
 
