@@ -62,7 +62,8 @@ Phase order rationale: monitoring first (zero risk, instruments everything after
 
 **Done when:** Phase-2 eval rerun via the tool-call adapter scores ≥ legacy baseline; new golden cases for read tools; legacy regex path deleted one release later.
 
-## [ ] Phase 5 — Multi-household + roles (~500 LOC)
+## [x] Phase 5 — Multi-household + roles (~500 LOC)
+> Landed. Migration 003 verified on the real-data rehearsal DB; isolation + role gates covered by tests/integration/test_multi_household.py; eval steady at 96.4%. Two-guild Discord verification pending user (needs a second server invite).
 
 **Migration `003_multi_household.sql`:** `guild_id` on reminders/chore_tasks/todos/chore_completions (NOT NULL DEFAULT 0, backfilled from `settings.discord_guild_id` — documented one-time step); `household_members` PK → `(guild_id, discord_id)`; new `user_settings(discord_id PK, home_guild_id)`. Thread `guild_id` through `bot/events.py`, `storage/repositories.py`, `core/tools/registry.py` (`ToolContext` gains `guild_id`, `is_admin`). `docs/multi-tenancy.md`.
 

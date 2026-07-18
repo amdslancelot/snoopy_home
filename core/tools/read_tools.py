@@ -62,7 +62,7 @@ async def _list_todos(args: dict, ctx: ToolContext) -> dict:
 
 async def _get_member_profile(args: dict, ctx: ToolContext) -> dict:
     name = (args.get("name") or "").strip()
-    profile = await member_repo.find_profile_by_name(name)
+    profile = await member_repo.find_profile_by_name(ctx.guild_id, name)
     if profile is None:
         return {"ok": False, "error": f"no household member matching '{name}'"}
     return {"name": name, "profile": profile}
@@ -78,7 +78,10 @@ async def _list_calendar_events(args: dict, ctx: ToolContext) -> dict:
 
 async def _chore_stats(args: dict, ctx: ToolContext) -> dict:
     days = int(args.get("days") or 7)
-    return {"days": days, "completions_by_member": await chore_repo.stats(days)}
+    return {
+        "days": days,
+        "completions_by_member": await chore_repo.stats(ctx.guild_id, days),
+    }
 
 
 def register(registry: ToolRegistry) -> None:

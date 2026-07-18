@@ -46,15 +46,16 @@ class ReminderRepository:
         is_recurring: bool = False,
         cron_expression: Optional[str] = None,
         voice: bool = False,
+        guild_id: int = 0,
     ) -> Reminder:
         row = await pool().fetchrow(
             """INSERT INTO reminders
                (channel_id, creator_id, target_user_id, message,
-                trigger_time, is_recurring, cron_expression, voice)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                trigger_time, is_recurring, cron_expression, voice, guild_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                RETURNING id""",
             channel_id, creator_id, target_user_id, message,
-            _aware_utc(trigger_time), is_recurring, cron_expression, voice,
+            _aware_utc(trigger_time), is_recurring, cron_expression, voice, guild_id,
         )
         return Reminder(
             id=row["id"],
@@ -78,6 +79,10 @@ class ReminderRepository:
     async def get_all_active(self) -> list[Reminder]:
         rows = await pool().fetch("SELECT * FROM reminders WHERE is_active")
         return [self._from_row(r) for r in rows]
+
+    async def get(self, reminder_id: int) -> Optional[Reminder]:
+        row = await pool().fetchrow("SELECT * FROM reminders WHERE id=$1", reminder_id)
+        return self._from_row(row) if row else None
 
     async def mark_inactive(self, reminder_id: int):
         await pool().execute("UPDATE reminders SET is_active=FALSE WHERE id=$1", reminder_id)
@@ -126,11 +131,13 @@ class ChoreRepository:
         description: str,
         assigned_user_id: Optional[int],
         cron_expression: str,
+        guild_id: int = 0,
     ) -> int:
         row = await pool().fetchrow(
-            """INSERT INTO chore_tasks (channel_id, name, description, assigned_user_id, cron_expression)
-               VALUES ($1, $2, $3, $4, $5) RETURNING id""",
-            channel_id, name, description, assigned_user_id, cron_expression,
+            """INSERT INTO chore_tasks
+               (channel_id, name, description, assigned_user_id, cron_expression, guild_id)
+               VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
+            channel_id, name, description, assigned_user_id, cron_expression, guild_id,
         )
         return row["id"]
 
@@ -141,48 +148,53 @@ class ChoreRepository:
         )
         return [dict(r) for r in rows]
 
-    async def list_all_active(self) -> list[dict]:
-        """All active chores enriched with the assignee's username (for the LLM context)."""
+    async def list_all_active(self, guild_id: int = 0) -> list[dict]:
+        """The guild's active chores enriched with the assignee's username (LLM context)."""
         rows = await pool().fetch(
             """SELECT c.name, c.description, c.cron_expression, c.assigned_user_id,
                       m.username AS assigned_username
                FROM chore_tasks c
-               LEFT JOIN household_members m ON m.discord_id = c.assigned_user_id
-               WHERE c.is_active"""
+               LEFT JOIN household_members m
+                      ON m.discord_id = c.assigned_user_id AND m.guild_id = c.guild_id
+               WHERE c.is_active AND c.guild_id = $1""",
+            guild_id,
         )
         return [dict(r) for r in rows]
 
-    async def complete_by_name(self, name: str, completed_by: Optional[int] = None) -> int:
-        """Mark a chore complete by (case-insensitive) name and log the completion.
-
-        Returns the number of chores matched (0 = nothing by that name).
-        """
+    async def complete_by_name(
+        self, name: str, completed_by: Optional[int] = None, guild_id: int = 0
+    ) -> int:
+        """Mark a chore complete by (case-insensitive) name within the guild
+        and log the completion. Returns the number of chores matched."""
         rows = await pool().fetch(
             """UPDATE chore_tasks SET last_completed=now()
-               WHERE lower(name)=lower($1) AND is_active
+               WHERE lower(name)=lower($1) AND is_active AND guild_id=$2
                RETURNING id""",
-            name,
+            name, guild_id,
         )
         for r in rows:
             await pool().execute(
-                "INSERT INTO chore_completions (chore_id, completed_by) VALUES ($1, $2)",
-                r["id"], completed_by,
+                """INSERT INTO chore_completions (chore_id, completed_by, guild_id)
+                   VALUES ($1, $2, $3)""",
+                r["id"], completed_by, guild_id,
             )
         return len(rows)
 
-    async def stats(self, days: int = 7) -> list[dict]:
-        """Completion counts per member over the last `days` days."""
+    async def stats(self, guild_id: int = 0, days: int = 7) -> list[dict]:
+        """Completion counts per member in the guild over the last `days` days."""
         rows = await pool().fetch(
             """SELECT COALESCE(m.username, cc.completed_by::text, 'unknown') AS member,
                       COUNT(*) AS completions,
                       array_agg(DISTINCT c.name) AS chores
                FROM chore_completions cc
                JOIN chore_tasks c ON c.id = cc.chore_id
-               LEFT JOIN household_members m ON m.discord_id = cc.completed_by
+               LEFT JOIN household_members m
+                     ON m.discord_id = cc.completed_by AND m.guild_id = cc.guild_id
                WHERE cc.completed_at > now() - make_interval(days => $1)
+                 AND cc.guild_id = $2
                GROUP BY 1
                ORDER BY completions DESC""",
-            days,
+            days, guild_id,
         )
         return [
             {"member": r["member"], "completions": r["completions"], "chores": list(r["chores"])}
@@ -202,10 +214,13 @@ class ChoreRepository:
 # ── Todos ─────────────────────────────────────────────────────────────────────
 
 class TodoRepository:
-    async def create(self, channel_id: int, title: str, assigned_user_ids: list[int]) -> int:
+    async def create(
+        self, channel_id: int, title: str, assigned_user_ids: list[int], guild_id: int = 0
+    ) -> int:
         row = await pool().fetchrow(
-            "INSERT INTO todos (channel_id, title, assigned_user_ids) VALUES ($1, $2, $3) RETURNING id",
-            channel_id, title, assigned_user_ids,
+            """INSERT INTO todos (channel_id, title, assigned_user_ids, guild_id)
+               VALUES ($1, $2, $3, $4) RETURNING id""",
+            channel_id, title, assigned_user_ids, guild_id,
         )
         return row["id"]
 
@@ -229,52 +244,85 @@ class TodoRepository:
 # ── Household members ─────────────────────────────────────────────────────────
 
 class MemberRepository:
-    async def upsert(self, discord_id: int, username: str, display_name: str):
+    """Per-guild roster: every method is scoped by guild_id."""
+
+    async def upsert(self, guild_id: int, discord_id: int, username: str, display_name: str):
         await pool().execute(
-            """INSERT INTO household_members (discord_id, username, display_name)
-               VALUES ($1, $2, $3)
-               ON CONFLICT (discord_id) DO UPDATE SET
+            """INSERT INTO household_members (guild_id, discord_id, username, display_name)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (guild_id, discord_id) DO UPDATE SET
                  username = EXCLUDED.username,
                  display_name = EXCLUDED.display_name""",
-            discord_id, username, display_name,
+            guild_id, discord_id, username, display_name,
         )
 
-    async def get_profile(self, discord_id: int) -> Optional[dict]:
+    async def get_profile(self, guild_id: int, discord_id: int) -> Optional[dict]:
         row = await pool().fetchrow(
-            "SELECT profile FROM household_members WHERE discord_id=$1", discord_id
+            "SELECT profile FROM household_members WHERE guild_id=$1 AND discord_id=$2",
+            guild_id, discord_id,
         )
         return dict(row["profile"]) if row else None
 
-    async def merge_profile(self, discord_id: int, updates: dict) -> bool:
+    async def merge_profile(self, guild_id: int, discord_id: int, updates: dict) -> bool:
         """Merge keys into the member's profile. False when the member is unknown."""
         result = await pool().execute(
-            "UPDATE household_members SET profile = profile || $1::jsonb WHERE discord_id=$2",
-            updates, discord_id,
+            """UPDATE household_members SET profile = profile || $1::jsonb
+               WHERE guild_id=$2 AND discord_id=$3""",
+            updates, guild_id, discord_id,
         )
         return result.split()[-1] != "0"
 
-    async def find_profile_by_name(self, name: str) -> Optional[dict]:
+    async def find_profile_by_name(self, guild_id: int, name: str) -> Optional[dict]:
         row = await pool().fetchrow(
             """SELECT profile FROM household_members
-               WHERE lower(username)=lower($1) OR lower(display_name)=lower($1)""",
-            name,
+               WHERE guild_id=$1 AND (lower(username)=lower($2) OR lower(display_name)=lower($2))""",
+            guild_id, name,
         )
         return dict(row["profile"]) if row else None
 
-    async def active_members(self) -> list[dict]:
+    async def active_members(self, guild_id: int) -> list[dict]:
         rows = await pool().fetch(
-            "SELECT username, display_name, profile FROM household_members WHERE is_active"
+            """SELECT username, display_name, profile FROM household_members
+               WHERE guild_id=$1 AND is_active""",
+            guild_id,
         )
         return [dict(r) for r in rows]
 
-    async def active_ids(self) -> list[int]:
+    async def active_ids(self, guild_id: int) -> list[int]:
         rows = await pool().fetch(
-            "SELECT discord_id FROM household_members WHERE is_active"
+            "SELECT discord_id FROM household_members WHERE guild_id=$1 AND is_active",
+            guild_id,
         )
         return [r["discord_id"] for r in rows]
+
+
+class UserSettingsRepository:
+    """Per-user settings, currently just the home guild used to scope DMs."""
+
+    async def get_home_guild(self, discord_id: int) -> Optional[int]:
+        return await pool().fetchval(
+            "SELECT home_guild_id FROM user_settings WHERE discord_id=$1", discord_id
+        )
+
+    async def set_home_guild(self, discord_id: int, guild_id: int):
+        await pool().execute(
+            """INSERT INTO user_settings (discord_id, home_guild_id) VALUES ($1, $2)
+               ON CONFLICT (discord_id) DO UPDATE SET home_guild_id = EXCLUDED.home_guild_id""",
+            discord_id, guild_id,
+        )
+
+
+async def backfill_guild_ids(guild_id: int) -> None:
+    """One-time backfill: adopt pre-multi-tenancy rows (guild_id=0) into the
+    configured guild. Idempotent; runs at startup when DISCORD_GUILD_ID is set."""
+    for table in ("reminders", "chore_tasks", "todos", "chore_completions", "household_members"):
+        await pool().execute(
+            f"UPDATE {table} SET guild_id=$1 WHERE guild_id=0", guild_id
+        )
 
 
 reminder_repo = ReminderRepository()
 chore_repo = ChoreRepository()
 todo_repo = TodoRepository()
 member_repo = MemberRepository()
+user_settings_repo = UserSettingsRepository()

@@ -99,68 +99,8 @@ class TestStampDate:
         assert messages[0]["content"] == original_content
 
 
-# ── update_household ──────────────────────────────────────────────────────────
-
-class TestUpdateHousehold:
-    def test_empty_household(self, client):
-        client.update_household([], [])
-        assert "No members registered yet" in client._household_context
-        assert "No chores scheduled yet" in client._household_context
-
-    def test_member_line_without_profile(self, client):
-        client.update_household(
-            [{"username": "alice", "display_name": "Alice", "profile": "{}"}], []
-        )
-        line = client._household_context
-        assert "Alice (@alice)" in line
-        # No profile bracket when profile is empty
-        alice_line = [l for l in line.splitlines() if "alice" in l.lower()][0]
-        assert "[" not in alice_line
-
-    def test_member_line_with_profile(self, client):
-        client.update_household(
-            [{"username": "bob", "display_name": "Bob",
-              "profile": '{"age": 30, "diet": "vegan"}'}], []
-        )
-        assert "age: 30" in client._household_context
-        assert "diet: vegan" in client._household_context
-
-    def test_chore_line_formatted(self, client):
-        client.update_household([], [{
-            "name": "Vacuum living room",
-            "description": "include corners",
-            "cron_expression": "0 11 * * 6",
-            "assigned_username": None,
-        }])
-        assert "Vacuum living room" in client._household_context
-        assert "0 11 * * 6" in client._household_context
-
-    def test_cache_invalidated_when_data_changes(self, client):
-        # Establish baseline with empty household first
-        client.update_household([], [])
-
-        # Now place a fresh cache handle
-        handle = _CacheHandle()
-        handle.name = "cache_abc"
-        handle.expires_at = datetime.utcnow() + timedelta(hours=1)
-        client._caches["somemodel"] = handle
-        assert handle.valid()
-
-        # Calling with different data must invalidate the cache
-        client.update_household(
-            [{"username": "alice", "display_name": "Alice", "profile": "{}"}], []
-        )
-        assert not handle.valid()
-
-    def test_cache_not_invalidated_when_data_same(self, client):
-        client.update_household([], [])  # set baseline
-        handle = _CacheHandle()
-        handle.name = "cache_xyz"
-        handle.expires_at = datetime.utcnow() + timedelta(hours=1)
-        client._caches["somemodel"] = handle
-
-        client.update_household([], [])  # same data again
-        assert handle.valid()
+# update_household moved to core/household.py (per-request block since
+# multi-tenancy) — see tests/unit/test_household.py.
 
 
 # ── _CacheHandle ──────────────────────────────────────────────────────────────

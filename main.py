@@ -13,6 +13,12 @@ async def main():
     await run_migrations()
     await init_pool()
 
+    if settings.discord_guild_id:
+        # Adopt pre-multi-tenancy rows (guild_id=0) into the configured guild.
+        from storage.repositories import backfill_guild_ids
+
+        await backfill_guild_ids(settings.discord_guild_id)
+
     # Import events to register all @bot.event and @bot.tree.command decorators.
     import bot.events  # noqa: F401
     from bot.client import bot

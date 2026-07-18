@@ -25,6 +25,8 @@ class ToolContext:
     author_id: int
     author_name: str = ""
     guild: Any = None            # discord.Guild in the bot; None in DMs/evals
+    guild_id: int = 0            # household scope (home guild in DMs)
+    is_admin: bool = False       # Discord manage_guild/administrator permission
     source_message: Any = None   # discord.Message in the bot; None in evals
     dry_run: bool = False        # evals: record the call, execute nothing
 

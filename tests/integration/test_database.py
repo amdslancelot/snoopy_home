@@ -109,7 +109,7 @@ class TestChoreRepository:
         assert rows[0]["last_completed"] is not None
 
     async def test_list_all_active_joins_assignee_username(self, pg_db):
-        await member_repo.upsert(555, "alice", "Alice")
+        await member_repo.upsert(0, 555, "alice", "Alice")
         await chore_repo.create(111, "Dishes", "", 555, "0 21 * * *")
         rows = await chore_repo.list_all_active()
         assert rows[0]["assigned_username"] == "alice"
@@ -139,32 +139,32 @@ class TestTodoRepository:
 
 class TestMemberRepository:
     async def test_profile_defaults_to_empty_dict(self, pg_db):
-        await member_repo.upsert(12345, "alice", "Alice")
-        assert await member_repo.get_profile(12345) == {}
+        await member_repo.upsert(0, 12345, "alice", "Alice")
+        assert await member_repo.get_profile(0, 12345) == {}
 
     async def test_merge_profile_merges_not_replaces(self, pg_db):
-        await member_repo.upsert(99999, "bob", "Bob")
-        assert await member_repo.merge_profile(99999, {"age": 28}) is True
-        assert await member_repo.merge_profile(99999, {"diet": "vegan"}) is True
-        assert await member_repo.get_profile(99999) == {"age": 28, "diet": "vegan"}
+        await member_repo.upsert(0, 99999, "bob", "Bob")
+        assert await member_repo.merge_profile(0, 99999, {"age": 28}) is True
+        assert await member_repo.merge_profile(0, 99999, {"diet": "vegan"}) is True
+        assert await member_repo.get_profile(0, 99999) == {"age": 28, "diet": "vegan"}
 
     async def test_merge_profile_unknown_member_returns_false(self, pg_db):
-        assert await member_repo.merge_profile(424242, {"x": 1}) is False
+        assert await member_repo.merge_profile(0, 424242, {"x": 1}) is False
 
     async def test_upsert_updates_names(self, pg_db):
-        await member_repo.upsert(777, "old", "Old Name")
-        await member_repo.upsert(777, "new", "New Name")
-        members = await member_repo.active_members()
+        await member_repo.upsert(0, 777, "old", "Old Name")
+        await member_repo.upsert(0, 777, "new", "New Name")
+        members = await member_repo.active_members(0)
         me = [m for m in members if m["username"] == "new"]
         assert me and me[0]["display_name"] == "New Name"
 
     async def test_find_profile_by_name_matches_display_name(self, pg_db):
-        await member_repo.upsert(888, "alice", "Ali")
-        await member_repo.merge_profile(888, {"google_email": "a@example.com"})
-        profile = await member_repo.find_profile_by_name("ali")
+        await member_repo.upsert(0, 888, "alice", "Ali")
+        await member_repo.merge_profile(0, 888, {"google_email": "a@example.com"})
+        profile = await member_repo.find_profile_by_name(0, "ali")
         assert profile == {"google_email": "a@example.com"}
 
     async def test_active_ids(self, pg_db):
-        await member_repo.upsert(1, "a", "A")
-        await member_repo.upsert(2, "b", "B")
-        assert set(await member_repo.active_ids()) == {1, 2}
+        await member_repo.upsert(0, 1, "a", "A")
+        await member_repo.upsert(0, 2, "b", "B")
+        assert set(await member_repo.active_ids(0)) == {1, 2}

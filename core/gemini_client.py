@@ -649,14 +649,6 @@ _PROMPT_SECTIONS_567 = (
 _SYSTEM_PROMPT_STATIC = _PROMPT_SECTIONS_123 + _PROMPT_SECTION4_LEGACY + _PROMPT_SECTIONS_567
 _SYSTEM_PROMPT_TOOLS = _PROMPT_SECTIONS_123 + _PROMPT_SECTION4_TOOLS + _PROMPT_SECTIONS_567
 
-_HOUSEHOLD_TEMPLATE = """
-## Household Members
-{members}
-
-## Active Chore Schedule
-{chores}
-"""
-
 
 # ── Cache handle ──────────────────────────────────────────────────────────────
 
@@ -686,39 +678,12 @@ class GeminiClient:
     def __init__(self):
         self._client = genai.Client(api_key=settings.gemini_api_key)
         self._caches: dict[str, _CacheHandle] = {}
-        self._household_context: str = ""
-
-    # ── Household data ────────────────────────────────────────────────────
-
-    def update_household(self, members: list[dict], chores: list[dict]):
-        """Rebuild the household section and invalidate caches if it changed."""
-        def _member_line(m: dict) -> str:
-            profile = m.get("profile") or {}
-            if isinstance(profile, str):  # legacy JSON-string form
-                profile = _json.loads(profile or "{}")
-            profile_str = " | ".join(f"{k}: {v}" for k, v in profile.items() if v)
-            profile_part = f"  [{profile_str}]" if profile_str else ""
-            return f"  - {m['display_name']} (@{m['username']}){profile_part}"
-
-        m_lines = "\n".join(_member_line(m) for m in members) or "  No members registered yet."
-
-        c_lines = "\n".join(
-            "  - {name}: {desc} [{cron}]{who}".format(
-                name=c["name"],
-                desc=c.get("description") or "no description",
-                cron=c["cron_expression"],
-                who=" — assigned to @" + c["assigned_username"] if c.get("assigned_username") else "",
-            )
-            for c in chores
-        ) or "  No chores scheduled yet."
-
-        new_section = _HOUSEHOLD_TEMPLATE.format(members=m_lines, chores=c_lines)
-        if new_section != self._household_context:
-            self._household_context = new_section
-            for h in self._caches.values():
-                h.invalidate()
 
     # ── Cache management ──────────────────────────────────────────────────
+    # The cache holds ONLY static content (persona, rules, tool schemas) and
+    # is shared across guilds. Per-guild household data rides as a leading
+    # context message per request (see core/household.py) — one cache per
+    # guild would multiply the 4096-token cache floor by the guild count.
 
     def _full_system_prompt(self) -> str:
         intro = _PERSONALITY_PROMPTS.get(
@@ -729,7 +694,7 @@ class GeminiClient:
             if settings.action_protocol == "tools"
             else _SYSTEM_PROMPT_STATIC
         )
-        return intro + static + self._household_context
+        return intro + static
 
     async def _ensure_cache(self, model: str):
         handle = self._caches.setdefault(model, _CacheHandle())
@@ -773,9 +738,13 @@ class GeminiClient:
         messages: list[dict],
         model: str,
         use_cache: bool = True,
+        household: str = "",
     ) -> tuple[str, list[dict]]:
         """
         Generate a response and extract any embedded <action> blocks.
+
+        `household` is the per-guild household block (roster + chores),
+        prepended as a leading context message — never cached.
 
         Returns (display_text, actions). display_text has <action> blocks
         stripped out; actions is a list of parsed action dicts.
@@ -786,6 +755,10 @@ class GeminiClient:
             types.Content(role=m["role"], parts=[types.Part(text=m["content"])])
             for m in stamped
         ]
+        if household:
+            contents.insert(
+                0, types.Content(role="user", parts=[types.Part(text=household)])
+            )
 
         gen_kwargs: dict = {}
 
@@ -843,6 +816,7 @@ class GeminiClient:
         use_cache: bool = True,
         max_iterations: int = 5,
         registry: Optional[ToolRegistry] = None,
+        household: str = "",
     ) -> tuple[str, list[dict]]:
         """Native function-calling loop.
 
@@ -861,6 +835,10 @@ class GeminiClient:
             types.Content(role=m["role"], parts=[types.Part(text=m["content"])])
             for m in stamped
         ]
+        if household:
+            contents.insert(
+                0, types.Content(role="user", parts=[types.Part(text=household)])
+            )
 
         executed: list[dict] = []
         loop = asyncio.get_running_loop()

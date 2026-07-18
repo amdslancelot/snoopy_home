@@ -13,13 +13,14 @@ from core.context_manager import context_manager
 from core.gemini_client import gemini_client
 from core.llm_router import router
 from core.message_parser import ComplexityAnalyzer
+from core.household import PREAMBLE, format_household
 from core.observability import get_logger, metrics
 from core.tools import read_tools
 from core.tools.declarations import DECLARATIONS
 from core.tools.registry import ToolContext, registry
 from integrations.google_calendar import google_calendar
 from integrations.voice_tts import speak_in_channel
-from storage.repositories import chore_repo, member_repo, todo_repo
+from storage.repositories import chore_repo, member_repo, todo_repo, user_settings_repo
 from tasks.reminder import reminder_manager
 from tasks.scheduler import init_scheduler, schedule_reminder, unschedule_reminder
 
@@ -40,15 +41,13 @@ _VOICE_RETRY_MAX = 30        # give up after this many retries (30 minutes)
 async def on_ready():
     log.info("ready", user=str(bot.user), user_id=bot.user.id)
     metrics.discord_events_total.labels(event="ready").inc()
-    await _sync_household_context()
     await _restore_reminders()
 
 
 @bot.event
 async def on_member_join(member: discord.Member):
     metrics.discord_events_total.labels(event="member_join").inc()
-    await _upsert_member(member)
-    await _sync_household_context()
+    await _upsert_member(member, member.guild.id)
 
 
 # ── Message handling ──────────────────────────────────────────────────────────
@@ -82,7 +81,27 @@ async def _handle(message: discord.Message, text: str):
     channel_id = message.channel.id
     username = message.author.display_name
 
-    await _upsert_member(message.author)
+    # Household scope: the guild the message came from, or the author's home
+    # guild for DMs (auto-adopted when they share exactly one server).
+    if message.guild:
+        guild = message.guild
+        guild_id = guild.id
+    else:
+        guild_id = await _resolve_home_guild(message.author)
+        if guild_id is None:
+            await message.channel.send(
+                "I don't know which household you belong to yet — run `/set_home` "
+                "in your household server once, then DM me again."
+            )
+            return
+        guild = bot.get_guild(guild_id)
+
+    is_admin = _member_is_admin(guild, message.author.id)
+    await _upsert_member(message.author, guild_id)
+    household = PREAMBLE + format_household(
+        await member_repo.active_members(guild_id),
+        await chore_repo.list_all_active(guild_id),
+    )
 
     complexity = _analyzer.analyze(text)
     model = router.select_model(complexity)
@@ -97,21 +116,23 @@ async def _handle(message: discord.Message, text: str):
                 channel_id=channel_id,
                 author_id=message.author.id,
                 author_name=username,
-                guild=message.guild,
+                guild=guild,
+                guild_id=guild_id,
+                is_admin=is_admin,
                 source_message=message,
             )
             # Tool executors run inside the loop (metrics recorded there).
             reply_text, actions = await gemini_client.generate_with_tools(
-                context_manager.get(channel_id), model, ctx
+                context_manager.get(channel_id), model, ctx, household=household
             )
         else:
             reply_text, actions = await gemini_client.generate(
-                context_manager.get(channel_id), model
+                context_manager.get(channel_id), model, household=household
             )
             for action in actions:
                 kind = action.get("type") or "unknown"
                 try:
-                    await _execute_action(action, message)
+                    await _execute_action(action, message, guild_id, is_admin)
                     metrics.action_executions_total.labels(action=kind, status="success").inc()
                 except Exception:
                     metrics.action_executions_total.labels(action=kind, status="error").inc()
@@ -133,38 +154,41 @@ async def _handle(message: discord.Message, text: str):
 
 # ── Action execution ──────────────────────────────────────────────────────────
 
-async def _execute_action(action: dict, source: discord.Message):
-    kind = action.get("type")
-    if kind == "create_reminder":
-        await _do_create_reminder(action, source)
-    elif kind == "create_chore":
-        await _do_create_chore(action, source)
-    elif kind == "complete_chore":
-        await _do_complete_chore(action, source)
-    elif kind == "cancel_reminder":
-        await _do_cancel_reminder(action, source)
-    elif kind == "update_profile":
-        await _do_update_profile(action, source)
-    elif kind == "create_calendar_event":
-        await _do_create_calendar_event(action, source)
-    elif kind == "delete_calendar_event":
-        await _do_delete_calendar_event(action, source)
-    elif kind == "update_calendar_event":
-        await _do_update_calendar_event(action, source)
-    elif kind == "speak_in_voice":
-        await _do_speak_in_voice(action, source)
+_ACTION_HANDLERS = {}  # populated below, after the handlers are defined
 
 
-async def _do_cancel_reminder(action: dict, source: discord.Message, notify: bool = True) -> dict:
+async def _execute_action(action: dict, source: discord.Message, guild_id: int = 0, is_admin: bool = False):
+    handler = _ACTION_HANDLERS.get(action.get("type"))
+    if handler:
+        await handler(action, source, guild_id=guild_id, is_admin=is_admin)
+
+
+async def _do_cancel_reminder(
+    action: dict, source: discord.Message, notify: bool = True,
+    guild_id: int = 0, is_admin: bool = False,
+) -> dict:
     rid = action.get("reminder_id")
     if not rid:
         return {"ok": False, "error": "missing reminder_id"}
+    reminder = await reminder_manager.get(int(rid))
+    if reminder is None or not reminder.is_active:
+        return {"ok": False, "error": f"no active reminder #{rid}"}
+    involved = source.author.id in (reminder.creator_id, reminder.target_user_id)
+    if not involved and reminder.target_user_id != 0 and not is_admin:
+        return {
+            "ok": False,
+            "error": "permission denied: only the creator, the target, or a server "
+            "admin can cancel someone else's reminder",
+        }
     await reminder_manager.mark_inactive(int(rid))
     unschedule_reminder(int(rid))
     return {"ok": True, "cancelled_reminder_id": int(rid)}
 
 
-async def _do_create_reminder(action: dict, source: discord.Message, notify: bool = True) -> dict:
+async def _do_create_reminder(
+    action: dict, source: discord.Message, notify: bool = True,
+    guild_id: int = 0, is_admin: bool = False,
+) -> dict:
     channel_id = source.channel.id
     creator_id = source.author.id
 
@@ -222,6 +246,7 @@ async def _do_create_reminder(action: dict, source: discord.Message, notify: boo
         is_recurring=is_recurring,
         cron_expression=cron_expr if is_recurring else None,
         voice=bool(action.get("voice", False)),
+        guild_id=guild_id,
     )
     job_id = schedule_reminder(reminder)
     await reminder_manager.update_job_id(reminder.id, job_id)
@@ -240,7 +265,10 @@ async def _do_create_reminder(action: dict, source: discord.Message, notify: boo
     }
 
 
-async def _do_create_chore(action: dict, source: discord.Message, notify: bool = True) -> dict:
+async def _do_create_chore(
+    action: dict, source: discord.Message, notify: bool = True,
+    guild_id: int = 0, is_admin: bool = False,
+) -> dict:
     cron = action.get("cron")
     if not cron:
         return {"ok": False, "error": "missing cron schedule"}
@@ -254,35 +282,50 @@ async def _do_create_chore(action: dict, source: discord.Message, notify: bool =
         description=action.get("description", ""),
         assigned_user_id=assigned_id,
         cron_expression=cron,
+        guild_id=guild_id,
     )
-    await _sync_household_context()
     return {"ok": True, "chore_id": chore_id, "name": name}
 
 
-async def _do_update_profile(action: dict, source: discord.Message, notify: bool = True) -> dict:
+async def _do_update_profile(
+    action: dict, source: discord.Message, notify: bool = True,
+    guild_id: int = 0, is_admin: bool = False,
+) -> dict:
     target_id = await _resolve_user_id(
         action.get("target_user", ""), source.guild, source.author.id
     )
     updates = action.get("updates") or {}
     if not updates or not target_id:
         return {"ok": False, "error": "missing updates or unknown target user"}
-    if not await member_repo.merge_profile(target_id, updates):
+    if target_id != source.author.id and not is_admin:
+        return {
+            "ok": False,
+            "error": "permission denied: only a server admin can edit another member's profile",
+        }
+    if not await member_repo.merge_profile(guild_id, target_id, updates):
         return {"ok": False, "error": "target user is not a registered household member"}
-    await _sync_household_context()
     return {"ok": True, "updated_keys": list(updates)}
 
 
-async def _do_complete_chore(action: dict, source: discord.Message, notify: bool = True) -> dict:
+async def _do_complete_chore(
+    action: dict, source: discord.Message, notify: bool = True,
+    guild_id: int = 0, is_admin: bool = False,
+) -> dict:
     name = action.get("name", "").strip()
     if not name:
         return {"ok": False, "error": "missing chore name"}
-    updated = await chore_repo.complete_by_name(name, source.author.id if source else None)
+    updated = await chore_repo.complete_by_name(
+        name, source.author.id if source else None, guild_id
+    )
     if not updated:
         return {"ok": False, "error": f"no active chore named '{name}' — check list_chores for the exact name"}
     return {"ok": True, "completed": name}
 
 
-async def _do_create_calendar_event(action: dict, source: discord.Message, notify: bool = True) -> dict:
+async def _do_create_calendar_event(
+    action: dict, source: discord.Message, notify: bool = True,
+    guild_id: int = 0, is_admin: bool = False,
+) -> dict:
     if not settings.household_calendar_id or not settings.google_service_account_json:
         if notify:
             await source.channel.send(
@@ -307,7 +350,7 @@ async def _do_create_calendar_event(action: dict, source: discord.Message, notif
     attendee_emails: list[str] = []
     for mention in action.get("attendees") or []:
         username = mention.lstrip("@").lower()
-        profile = await member_repo.find_profile_by_name(username)
+        profile = await member_repo.find_profile_by_name(guild_id, username)
         email = (profile or {}).get("google_email")
         if email:
             attendee_emails.append(email)
@@ -329,7 +372,10 @@ async def _do_create_calendar_event(action: dict, source: discord.Message, notif
     return {"ok": True, "title": action.get("title"), "invited": attendee_emails}
 
 
-async def _do_update_calendar_event(action: dict, source: discord.Message, notify: bool = True) -> dict:
+async def _do_update_calendar_event(
+    action: dict, source: discord.Message, notify: bool = True,
+    guild_id: int = 0, is_admin: bool = False,
+) -> dict:
     if not settings.household_calendar_id or not settings.google_service_account_json:
         if notify:
             await source.channel.send(
@@ -362,7 +408,10 @@ async def _do_update_calendar_event(action: dict, source: discord.Message, notif
     return {"ok": True, "title": title}
 
 
-async def _do_delete_calendar_event(action: dict, source: discord.Message, notify: bool = True) -> dict:
+async def _do_delete_calendar_event(
+    action: dict, source: discord.Message, notify: bool = True,
+    guild_id: int = 0, is_admin: bool = False,
+) -> dict:
     if not settings.household_calendar_id or not settings.google_service_account_json:
         if notify:
             await source.channel.send(
@@ -387,7 +436,10 @@ async def _do_delete_calendar_event(action: dict, source: discord.Message, notif
     return {"ok": True, "deleted": title}
 
 
-async def _do_speak_in_voice(action: dict, source: discord.Message, notify: bool = True) -> dict:
+async def _do_speak_in_voice(
+    action: dict, source: discord.Message, notify: bool = True,
+    guild_id: int = 0, is_admin: bool = False,
+) -> dict:
     text = action.get("message", "").strip()
     if not text:
         return {"ok": False, "error": "missing message"}
@@ -440,6 +492,7 @@ async def cmd_create_chore(interaction: discord.Interaction, description: str):
     complexity = _analyzer.analyze(description)
     model = router.select_model(complexity)
 
+    guild_id = interaction.guild_id or 0
     try:
         if settings.action_protocol == "tools":
             ctx = ToolContext(
@@ -447,6 +500,8 @@ async def cmd_create_chore(interaction: discord.Interaction, description: str):
                 author_id=interaction.user.id,
                 author_name=interaction.user.display_name,
                 guild=interaction.guild,
+                guild_id=guild_id,
+                is_admin=_member_is_admin(interaction.guild, interaction.user.id),
                 source_message=_InteractionSource(interaction),
             )
             reply_text, actions = await gemini_client.generate_with_tools(messages, model, ctx)
@@ -482,8 +537,8 @@ async def cmd_create_chore(interaction: discord.Interaction, description: str):
         description=chore_action.get("description", ""),
         assigned_user_id=assigned_id,
         cron_expression=chore_action.get("cron"),
+        guild_id=guild_id,
     )
-    await _sync_household_context()
     await interaction.followup.send(reply_text or f"Added: {chore_action.get('name')}")
 
 
@@ -494,7 +549,9 @@ async def cmd_create_chore(interaction: discord.Interaction, description: str):
 )
 async def cmd_create_todo(interaction: discord.Interaction, title: str, assigned_to: str = ""):
     user_ids = await _resolve_user_ids(assigned_to, interaction.guild)
-    await todo_repo.create(interaction.channel_id, title.strip(), user_ids)
+    await todo_repo.create(
+        interaction.channel_id, title.strip(), user_ids, guild_id=interaction.guild_id or 0
+    )
     mentions = " ".join(f"<@{uid}>" for uid in user_ids) if user_ids else ""
     suffix = f" — {mentions}" if mentions else ""
     await interaction.response.send_message(f"Added to-do: **{title}**{suffix}")
@@ -533,6 +590,12 @@ async def cmd_summary(interaction: discord.Interaction):
 @bot.tree.command(name="remove_chore", description="Remove a recurring chore")
 @app_commands.describe(name="Name of the chore to remove (partial name is fine)")
 async def cmd_remove_chore(interaction: discord.Interaction, name: str):
+    if not _member_is_admin(interaction.guild, interaction.user.id):
+        await interaction.response.send_message(
+            "Removing chores needs the **Manage Server** permission — ask an admin.",
+            ephemeral=True,
+        )
+        return
     candidates = await chore_repo.find_active(interaction.channel_id)
 
     match = _fuzzy_match(name, candidates)
@@ -546,7 +609,6 @@ async def cmd_remove_chore(interaction: discord.Interaction, name: str):
 
     rid, rname = match
     await chore_repo.deactivate(rid)
-    await _sync_household_context()
     await interaction.response.send_message(f"Removed chore: **{rname}**")
 
 
@@ -571,10 +633,32 @@ async def cmd_remove_todo(interaction: discord.Interaction, title: str):
 
 @bot.tree.command(name="register", description="Register yourself as a household member")
 async def cmd_register(interaction: discord.Interaction):
-    await _upsert_member(interaction.user)
-    await _sync_household_context()
+    if not interaction.guild_id:
+        await interaction.response.send_message(
+            "Run this inside your household server so I know which household to add you to.",
+            ephemeral=True,
+        )
+        return
+    await _upsert_member(interaction.user, interaction.guild_id)
+    await user_settings_repo.set_home_guild(interaction.user.id, interaction.guild_id)
     await interaction.response.send_message(
         f"Welcome, {interaction.user.display_name}! You're now registered as a household member.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="set_home", description="Make this server your home household (used for DMs)")
+async def cmd_set_home(interaction: discord.Interaction):
+    if not interaction.guild_id:
+        await interaction.response.send_message(
+            "Run this inside the server you want as your home household.", ephemeral=True
+        )
+        return
+    await _upsert_member(interaction.user, interaction.guild_id)
+    await user_settings_repo.set_home_guild(interaction.user.id, interaction.guild_id)
+    await interaction.response.send_message(
+        f"Done — **{interaction.guild.name}** is now your home household. "
+        "DMs to me will use this household's data.",
         ephemeral=True,
     )
 
@@ -635,12 +719,38 @@ async def _resolve_user_ids(names_str: str, guild: Optional[discord.Guild]) -> l
     return ids
 
 
-async def _all_member_mentions() -> str:
+async def _all_member_mentions(guild_id: int) -> str:
     parts = []
-    for uid in await member_repo.active_ids():
+    for uid in await member_repo.active_ids(guild_id):
         user = bot.get_user(uid)
         parts.append(user.mention if user else f"<@{uid}>")
     return " ".join(parts) if parts else "@here"
+
+
+def _member_is_admin(guild: Optional[discord.Guild], user_id: int) -> bool:
+    """Admin = Discord Manage Server or Administrator permission in the guild.
+
+    Derived live from Discord — no stored role column to drift."""
+    if guild is None:
+        return False
+    member = guild.get_member(user_id)
+    if member is None:
+        return False
+    perms = member.guild_permissions
+    return perms.manage_guild or perms.administrator
+
+
+async def _resolve_home_guild(user: discord.User) -> Optional[int]:
+    """Which household does a DM belong to? Explicit /set_home wins; a user
+    sharing exactly one guild with the bot is auto-adopted into it."""
+    stored = await user_settings_repo.get_home_guild(user.id)
+    if stored:
+        return stored
+    mutual = [g for g in bot.guilds if g.get_member(user.id)]
+    if len(mutual) == 1:
+        await user_settings_repo.set_home_guild(user.id, mutual[0].id)
+        return mutual[0].id
+    return None
 
 
 def _parse_dt(raw: str) -> Optional[datetime]:
@@ -652,15 +762,8 @@ def _parse_dt(raw: str) -> Optional[datetime]:
         return reminder_manager.parse_datetime(raw)
 
 
-async def _upsert_member(user: Union[discord.Member, discord.User]):
-    await member_repo.upsert(user.id, user.name, getattr(user, "display_name", user.name))
-
-
-async def _sync_household_context():
-    """Refresh gemini_client's cached household section from the database."""
-    members = await member_repo.active_members()
-    chores = await chore_repo.list_all_active()  # includes assigned_username
-    gemini_client.update_household(members, chores)
+async def _upsert_member(user: Union[discord.Member, discord.User], guild_id: int):
+    await member_repo.upsert(guild_id, user.id, user.name, getattr(user, "display_name", user.name))
 
 
 async def _restore_reminders():
@@ -702,8 +805,8 @@ async def _fire_reminder(
     guild = getattr(channel, "guild", None)
 
     if target_user_id == 0:
-        # Group reminder — ping all registered household members
-        mention = await _all_member_mentions()
+        # Group reminder — ping the household this channel belongs to
+        mention = await _all_member_mentions(guild.id if guild else 0)
         await channel.send(f"⏰ {mention} — {message}")
         if voice and guild:
             await speak_in_channel(bot, guild, message, None)
@@ -806,26 +909,37 @@ def _mention(user_id: Optional[int]) -> str:
 # Registered at import time — the same injection direction as init_scheduler,
 # so core/ never imports bot/.
 
+_ACTION_HANDLERS.update(
+    {
+        "create_reminder": _do_create_reminder,
+        "create_chore": _do_create_chore,
+        "complete_chore": _do_complete_chore,
+        "cancel_reminder": _do_cancel_reminder,
+        "create_calendar_event": _do_create_calendar_event,
+        "update_calendar_event": _do_update_calendar_event,
+        "delete_calendar_event": _do_delete_calendar_event,
+        "speak_in_voice": _do_speak_in_voice,
+        "update_profile": _do_update_profile,
+    }
+)
+
+
 def _register_tools():
     read_tools.register(registry)
 
     def _wrap(handler):
         async def executor(args: dict, ctx: ToolContext) -> dict:
-            return await handler(args, ctx.source_message, notify=False)
+            return await handler(
+                args,
+                ctx.source_message,
+                notify=False,
+                guild_id=ctx.guild_id,
+                is_admin=ctx.is_admin,
+            )
 
         return executor
 
-    for name, handler in [
-        ("create_reminder", _do_create_reminder),
-        ("create_chore", _do_create_chore),
-        ("complete_chore", _do_complete_chore),
-        ("cancel_reminder", _do_cancel_reminder),
-        ("create_calendar_event", _do_create_calendar_event),
-        ("update_calendar_event", _do_update_calendar_event),
-        ("delete_calendar_event", _do_delete_calendar_event),
-        ("speak_in_voice", _do_speak_in_voice),
-        ("update_profile", _do_update_profile),
-    ]:
+    for name, handler in _ACTION_HANDLERS.items():
         registry.register(DECLARATIONS[name], _wrap(handler))
 
 

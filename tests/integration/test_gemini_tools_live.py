@@ -53,9 +53,7 @@ class TestGeminiToolsLive:
     def client(self):
         from core.gemini_client import GeminiClient
 
-        c = GeminiClient()
-        c.update_household([], [])
-        return c
+        return GeminiClient()
 
     async def test_tools_prompt_clears_cache_token_floor(self, client):
         count = client._client.models.count_tokens(

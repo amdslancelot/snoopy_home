@@ -39,12 +39,9 @@ class TestGeminiAPILive:
 
     @pytest.fixture
     def client(self):
-        from unittest.mock import patch
         # Use real API client — no mocking
         from core.gemini_client import GeminiClient
-        c = GeminiClient()
-        c.update_household([], [])
-        return c
+        return GeminiClient()
 
     @pytest.fixture
     def model(self):
@@ -101,13 +98,16 @@ class TestGeminiAPILive:
         assert actions == []
 
     async def test_profile_update_emits_update_profile_action(self, client, model):
-        client.update_household(
+        from core.household import PREAMBLE, format_household
+
+        household = PREAMBLE + format_household(
             [{"username": "alice", "display_name": "Alice", "profile": "{}"}], []
         )
         _, actions = await client.generate(
             self._msg("by the way I'm 28 and I usually wake up at 6:30am"),
             model=model,
             use_cache=False,
+            household=household,
         )
         action_types = [a.get("type") for a in actions]
         assert "update_profile" in action_types
