@@ -40,5 +40,19 @@ class Settings(BaseSettings):
     # Bot personality ("default" = neutral assistant, "snoopy" = Snoopy the beagle)
     bot_personality: str = "default"
 
+    # Observability
+    metrics_port: int = 8080
+    log_format: str = "console"  # "console" (dev) | "json" (production)
+    log_level: str = "INFO"
+
+    # USD per 1M tokens, used for the llm_cost_usd_total metric. Approximate —
+    # verify against https://ai.google.dev/gemini-api/docs/pricing and override
+    # via the MODEL_PRICES env var (JSON) when Google reprices.
+    model_prices: dict = {
+        "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40, "cached": 0.025},
+        "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "cached": 0.075},
+        "gemini-2.5-pro": {"input": 1.25, "output": 10.00, "cached": 0.31},
+    }
+
 
 settings = Settings()

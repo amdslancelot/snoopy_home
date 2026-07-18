@@ -2,6 +2,16 @@ import aiosqlite
 from config import settings
 
 
+async def db_ping() -> bool:
+    """Health-check probe: True when the database answers a trivial query."""
+    try:
+        async with aiosqlite.connect(settings.db_path) as db:
+            await db.execute("SELECT 1")
+        return True
+    except Exception:
+        return False
+
+
 async def init_db():
     async with aiosqlite.connect(settings.db_path) as db:
         await db.executescript("""

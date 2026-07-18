@@ -18,4 +18,7 @@ RUN chmod +x entrypoint.sh
 # SQLite lives here; mount a named volume so data survives restarts
 VOLUME /data
 
+# Health (/health, /ready) and Prometheus (/metrics) endpoints
+EXPOSE 8080
+
 ENTRYPOINT ["./entrypoint.sh"]

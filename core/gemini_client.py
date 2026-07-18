@@ -26,6 +26,7 @@ Minimum cached token requirements (Gemini):
 import asyncio
 import json as _json
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -34,6 +35,9 @@ from google import genai
 from google.genai import types
 
 from config import settings
+from core.observability import get_logger, metrics
+
+log = get_logger("gemini")
 
 # ── Static system prompt ──────────────────────────────────────────────────────
 # Must exceed 4 096 tokens (Gemini context-cache minimum).
@@ -675,8 +679,11 @@ class GeminiClient:
             )
             handle.name = cache.name
             handle.expires_at = datetime.utcnow() + timedelta(seconds=settings.cache_ttl_seconds)
+            metrics.cache_events_total.labels(event="created").inc()
+            log.info("cache_created", model=model, cache=cache.name)
         except Exception as exc:
-            print("[gemini] cache creation failed for {}: {}".format(model, exc))
+            metrics.cache_events_total.labels(event="create_failed").inc()
+            log.warning("cache_create_failed", model=model, error=str(exc))
             handle.invalidate()
 
     # ── Generation ────────────────────────────────────────────────────────
@@ -708,18 +715,40 @@ class GeminiClient:
             if handle and handle.valid():
                 gen_kwargs["cached_content"] = handle.name
 
+        cached = "cached_content" in gen_kwargs
+        metrics.cache_events_total.labels(event="hit" if cached else "uncached").inc()
+
         config = types.GenerateContentConfig(**gen_kwargs) if gen_kwargs else None
 
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: self._client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=config or types.GenerateContentConfig(
-                    system_instruction=self._full_system_prompt(),
+        start = time.perf_counter()
+        try:
+            response = await loop.run_in_executor(
+                None,
+                lambda: self._client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config or types.GenerateContentConfig(
+                        system_instruction=self._full_system_prompt(),
+                    ),
                 ),
-            ),
+            )
+        except Exception:
+            metrics.llm_requests_total.labels(model=model, status="error").inc()
+            raise
+
+        duration = time.perf_counter() - start
+        metrics.llm_request_duration_seconds.labels(model=model).observe(duration)
+        metrics.llm_requests_total.labels(model=model, status="success").inc()
+
+        usage = getattr(response, "usage_metadata", None)
+        cost = metrics.record_llm_usage(model, usage) if usage else 0.0
+        log.info(
+            "llm_response",
+            model=model,
+            duration_s=round(duration, 2),
+            cached=cached,
+            cost_usd=round(cost, 6),
         )
 
         raw = response.text or ""
@@ -760,7 +789,7 @@ class GeminiClient:
             try:
                 actions.append(_json.loads(match.group(1)))
             except _json.JSONDecodeError as e:
-                print("[gemini] malformed action JSON: {}\n{}".format(e, match.group(1)))
+                log.warning("malformed_action_json", error=str(e), raw=match.group(1)[:200])
         clean = pattern.sub("", text).strip()
         return clean, actions
 

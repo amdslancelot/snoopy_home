@@ -15,11 +15,14 @@ from core.context_manager import context_manager
 from core.gemini_client import gemini_client
 from core.llm_router import router
 from core.message_parser import ComplexityAnalyzer
+from core.observability import get_logger, metrics
 from integrations.google_calendar import google_calendar
 from integrations.voice_tts import speak_in_channel
 from storage.models import HouseholdMember
 from tasks.reminder import reminder_manager
 from tasks.scheduler import init_scheduler, schedule_reminder, unschedule_reminder
+
+log = get_logger("bot")
 
 _analyzer = ComplexityAnalyzer()
 
@@ -34,13 +37,15 @@ _VOICE_RETRY_MAX = 30        # give up after this many retries (30 minutes)
 
 @bot.event
 async def on_ready():
-    print(f"[{settings.bot_name}] Ready — logged in as {bot.user} (ID: {bot.user.id})")
+    log.info("ready", user=str(bot.user), user_id=bot.user.id)
+    metrics.discord_events_total.labels(event="ready").inc()
     await _sync_household_context()
     await _restore_reminders()
 
 
 @bot.event
 async def on_member_join(member: discord.Member):
+    metrics.discord_events_total.labels(event="member_join").inc()
     await _upsert_member(member)
     await _sync_household_context()
 
@@ -49,22 +54,22 @@ async def on_member_join(member: discord.Member):
 
 @bot.event
 async def on_message(message: discord.Message):
-    print(f"[on_message] author={message.author} bot={message.author.bot} content={message.content[:80]!r}")
     if message.author.bot:
         return
+
+    metrics.discord_events_total.labels(event="message").inc()
 
     is_dm = isinstance(message.channel, discord.DMChannel)
     is_mentioned = (
         bot.user in message.mentions
         or any(r.name.lower() == settings.bot_name.lower() for r in message.role_mentions)
     )
-    print(f"[on_message] is_dm={is_dm} is_mentioned={is_mentioned}")
+    log.debug("message_received", author=str(message.author), is_dm=is_dm, is_mentioned=is_mentioned)
 
     if not (is_dm or is_mentioned):
         return
 
     text = re.sub(rf"<@[!&]?\d+>", "", message.content).strip()
-    print(f"[on_message] text after strip={text!r}")
     if not text:
         return
 
@@ -80,7 +85,8 @@ async def _handle(message: discord.Message, text: str):
 
     complexity = _analyzer.analyze(text)
     model = router.select_model(complexity)
-    print(router.describe(complexity))
+    metrics.router_tier_total.labels(tier=complexity.tier.name).inc()
+    log.info("model_selected", tier=complexity.tier.name, model=model, summary=complexity.summary)
 
     context_manager.add_user(channel_id, text, username)
 
@@ -89,21 +95,23 @@ async def _handle(message: discord.Message, text: str):
             context_manager.get(channel_id), model
         )
     except Exception as exc:
-        print(f"[gemini] generate failed: {exc}")
+        log.error("generate_failed", error=str(exc))
         await message.channel.send("Sorry, I couldn't reach the AI right now. Please try again.")
         return
 
     for action in actions:
+        kind = action.get("type") or "unknown"
         try:
             await _execute_action(action, message)
-        except Exception as exc:
-            print(f"[bot] action '{action.get('type')}' raised: {exc}")
-            import traceback; traceback.print_exc()
+            metrics.action_executions_total.labels(action=kind, status="success").inc()
+        except Exception:
+            metrics.action_executions_total.labels(action=kind, status="error").inc()
+            log.exception("action_failed", action=kind)
 
     if not reply_text and actions:
         reply_text = "Done!"
     elif not reply_text:
-        print(f"[bot] Gemini returned empty text with no actions for: {text[:80]!r}")
+        log.warning("empty_reply", text=text[:80])
         reply_text = "Sorry, I didn't quite understand that. Could you rephrase?"
 
     context_manager.add_bot(channel_id, reply_text)
@@ -149,7 +157,13 @@ async def _do_create_reminder(action: dict, source: discord.Message):
     is_recurring = bool(action.get("recurring"))
     cron_expr = action.get("cron")
 
-    print(f"[reminder] action received: target={action.get('target_user')!r} datetime={raw_dt!r} recurring={is_recurring} cron={cron_expr!r}")
+    log.info(
+        "reminder_action",
+        target=action.get("target_user"),
+        datetime=raw_dt,
+        recurring=is_recurring,
+        cron=cron_expr,
+    )
 
     if is_recurring and cron_expr:
         trigger_time = datetime.utcnow()
@@ -157,7 +171,6 @@ async def _do_create_reminder(action: dict, source: discord.Message):
         trigger_time = _parse_dt(raw_dt)
 
     now_utc = datetime.utcnow()
-    print(f"[reminder] parsed trigger_time={trigger_time}  utcnow={now_utc}")
 
     if not trigger_time:
         await source.channel.send(
@@ -167,7 +180,7 @@ async def _do_create_reminder(action: dict, source: discord.Message):
         return
 
     if trigger_time <= now_utc:
-        print(f"[reminder] WARN: trigger is in the past ({trigger_time} <= {now_utc}), raw_dt={raw_dt!r}")
+        log.warning("reminder_trigger_in_past", trigger=str(trigger_time), raw=raw_dt)
         await source.channel.send(
             f"Sorry {source.author.mention}, I couldn't calculate that time correctly. "
             "Try again with an explicit time, e.g. 'remind me at 9:00 pm'."
@@ -177,7 +190,7 @@ async def _do_create_reminder(action: dict, source: discord.Message):
     _MIN_LEAD = timedelta(seconds=10)
     if trigger_time - now_utc < _MIN_LEAD:
         trigger_time = now_utc + _MIN_LEAD
-        print(f"[reminder] trigger adjusted to {trigger_time} (was too close to now)")
+        log.info("reminder_trigger_adjusted", trigger=str(trigger_time))
 
     reminder = await reminder_manager.create(
         channel_id=channel_id,
@@ -191,7 +204,13 @@ async def _do_create_reminder(action: dict, source: discord.Message):
     )
     job_id = schedule_reminder(reminder)
     await reminder_manager.update_job_id(reminder.id, job_id)
-    print(f"[reminder] created id={reminder.id} target_user_id={target_id} trigger={trigger_time} job={job_id}")
+    log.info(
+        "reminder_created",
+        reminder_id=reminder.id,
+        target_user_id=target_id,
+        trigger=str(trigger_time),
+        job_id=job_id,
+    )
 
 
 async def _do_create_chore(action: dict, source: discord.Message):
@@ -413,7 +432,7 @@ async def cmd_create_chore(interaction: discord.Interaction, description: str):
     try:
         reply_text, actions = await gemini_client.generate(messages, model)
     except Exception as exc:
-        print(f"[chore cmd] generate failed: {exc}")
+        log.error("chore_cmd_generate_failed", error=str(exc))
         await interaction.followup.send("Sorry, I couldn't reach the AI right now.", ephemeral=True)
         return
 
@@ -693,7 +712,7 @@ async def _restore_reminders():
         if r.is_recurring or r.trigger_time > datetime.utcnow():
             schedule_reminder(r)
             restored += 1
-    print(f"[{settings.bot_name}] Restored {restored} active reminder(s).")
+    log.info("reminders_restored", count=restored)
 
 
 async def _fire_reminder(
@@ -704,13 +723,20 @@ async def _fire_reminder(
     is_recurring: bool,
     voice: bool = False,
 ):
-    print(f"[reminder] firing id={reminder_id} channel={channel_id} target={target_user_id} voice={voice}")
+    metrics.reminders_fired_total.inc()
+    log.info(
+        "reminder_firing",
+        reminder_id=reminder_id,
+        channel_id=channel_id,
+        target=target_user_id,
+        voice=voice,
+    )
     channel = bot.get_channel(channel_id)
     if channel is None:
         try:
             channel = await bot.fetch_channel(channel_id)
         except Exception as exc:
-            print(f"[reminder] could not fetch channel {channel_id}: {exc}")
+            log.error("reminder_channel_fetch_failed", channel_id=channel_id, error=str(exc))
             return
 
     guild = getattr(channel, "guild", None)
@@ -765,7 +791,7 @@ def _start_voice_retry(
         "message": message,
         "channel_id": channel_id,
     }
-    print(f"[voice] started retry loop for reminder {reminder_id} (target={target_user_id})")
+    log.info("voice_retry_started", reminder_id=reminder_id, target=target_user_id)
 
 
 async def _voice_retry_loop(
@@ -780,7 +806,7 @@ async def _voice_retry_loop(
             await asyncio.sleep(_VOICE_RETRY_INTERVAL)
         except asyncio.CancelledError:
             # on_voice_state_update already handled playback
-            print(f"[voice] retry loop cancelled for reminder {reminder_id} (picked up via event)")
+            log.info("voice_retry_cancelled", reminder_id=reminder_id)
             return
 
         if reminder_id not in _voice_pending:
@@ -790,12 +816,12 @@ async def _voice_retry_loop(
         member = guild.get_member(target_user_id) if guild else None
 
         if member and member.voice and member.voice.channel:
-            print(f"[voice] attempt {attempt}: {target_user_id} is in voice, playing")
+            log.info("voice_retry_playing", attempt=attempt, target=target_user_id)
             _voice_pending.pop(reminder_id, None)
             await speak_in_channel(bot, guild, message, target_user_id)
             return
 
-        print(f"[voice] attempt {attempt}/{_VOICE_RETRY_MAX}: {target_user_id} still not in voice")
+        log.debug("voice_retry_waiting", attempt=attempt, max=_VOICE_RETRY_MAX, target=target_user_id)
 
     # All 30 attempts exhausted — send text fallback
     _voice_pending.pop(reminder_id, None)
@@ -804,7 +830,7 @@ async def _voice_retry_loop(
         await channel.send(
             f"⏰ {_mention(target_user_id)} — couldn't reach you in voice after 30 minutes: {message}"
         )
-    print(f"[voice] retry loop exhausted for reminder {reminder_id}")
+    log.info("voice_retry_exhausted", reminder_id=reminder_id)
 
 
 def _mention(user_id: Optional[int]) -> str:
@@ -829,5 +855,5 @@ async def on_voice_state_update(
         if info is None:
             continue
         info["task"].cancel()
-        print(f"[voice] {member.id} joined voice — playing TTS for reminder {rid}")
+        log.info("voice_pickup", member_id=member.id, reminder_id=rid)
         await speak_in_channel(bot, member.guild, info["message"], member.id)

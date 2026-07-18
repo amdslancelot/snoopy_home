@@ -12,7 +12,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
+from core.observability import get_logger
 from storage.models import Reminder
+
+log = get_logger("scheduler")
 
 _scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -27,6 +30,11 @@ def init_scheduler(fire_callback: Callable[..., Awaitable[None]]):
         _scheduler.start()
 
 
+def is_running() -> bool:
+    """Health-check probe for the readiness endpoint."""
+    return _scheduler.running
+
+
 async def _dispatch(
     channel_id: int,
     target_user_id: int,
@@ -39,7 +47,7 @@ async def _dispatch(
         try:
             await _fire_cb(channel_id, target_user_id, message, reminder_id, is_recurring, voice)
         except Exception as exc:
-            print(f"[scheduler] _fire_reminder raised an exception: {exc}")
+            log.error("fire_reminder_failed", reminder_id=reminder_id, error=str(exc))
 
 
 def schedule_reminder(reminder: Reminder) -> str:

@@ -5,6 +5,9 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from config import settings
+from core.observability import get_logger
+
+log = get_logger("calendar")
 
 
 def _best_title_match(query: str, items: list[dict]) -> Optional[dict]:
@@ -47,12 +50,12 @@ class GoogleCalendarClient:
                     calendarId=settings.household_calendar_id
                 ).execute()
                 self._calendar_timezone = cal.get("timeZone")
-                print(f"[calendar] detected timezone: {self._calendar_timezone}")
+                log.info("timezone_detected", timezone=self._calendar_timezone)
             except Exception as exc:
-                print(f"[calendar] could not fetch calendar timezone: {exc}")
+                log.warning("timezone_fetch_failed", error=str(exc))
             return self._service
         except Exception as exc:
-            print(f"[calendar] failed to build service: {exc}")
+            log.error("service_build_failed", error=str(exc))
             return None
 
     @property
@@ -83,7 +86,7 @@ class GoogleCalendarClient:
 
         loop = asyncio.get_running_loop()
         try:
-            print(f"[calendar] search: title={title!r} timeMin={time_min!r} timeMax={time_max!r}")
+            log.debug("event_search", title=title, time_min=time_min, time_max=time_max)
             result = await loop.run_in_executor(
                 None,
                 lambda: service.events()
@@ -97,10 +100,10 @@ class GoogleCalendarClient:
                 .execute(),
             )
             items = result.get("items", [])
-            print(f"[calendar] found {len(items)} event(s): {[e.get('summary') for e in items]}")
+            log.debug("events_found", count=len(items), titles=[e.get("summary") for e in items])
             return _best_title_match(title, items)
         except Exception as exc:
-            print(f"[calendar] _find_event failed: {exc}")
+            log.error("find_event_failed", title=title, error=str(exc))
             return None
 
     async def create_event(
@@ -141,7 +144,7 @@ class GoogleCalendarClient:
             )
             return True
         except Exception as exc:
-            print(f"[calendar] create_event failed: {exc}")
+            log.error("create_event_failed", title=title, error=str(exc))
             return False
 
     async def update_event(
@@ -159,7 +162,7 @@ class GoogleCalendarClient:
 
         match = await self._find_event(title, start)
         if not match:
-            print(f"[calendar] no event found for update: title={title!r}")
+            log.warning("update_event_not_found", title=title)
             return False
 
         event_id = match["id"]
@@ -205,10 +208,10 @@ class GoogleCalendarClient:
                 )
                 .execute(),
             )
-            print(f"[calendar] updated event id={event_id} patch={list(patch.keys())}")
+            log.info("event_updated", event_id=event_id, fields=list(patch.keys()))
             return True
         except Exception as exc:
-            print(f"[calendar] update_event failed: {exc}")
+            log.error("update_event_failed", title=title, error=str(exc))
             return False
 
     async def delete_event(self, title: str, start: Optional[datetime]) -> bool:
@@ -218,7 +221,7 @@ class GoogleCalendarClient:
 
         match = await self._find_event(title, start)
         if not match:
-            print(f"[calendar] no event found for delete: title={title!r}")
+            log.warning("delete_event_not_found", title=title)
             return False
 
         event_id = match["id"]
@@ -233,10 +236,10 @@ class GoogleCalendarClient:
                 )
                 .execute(),
             )
-            print(f"[calendar] deleted event id={event_id} title={match.get('summary')!r}")
+            log.info("event_deleted", event_id=event_id, title=match.get("summary"))
             return True
         except Exception as exc:
-            print(f"[calendar] delete_event failed: {exc}")
+            log.error("delete_event_failed", title=title, error=str(exc))
             return False
 
 

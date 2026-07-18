@@ -6,6 +6,9 @@ from typing import Optional
 import discord
 
 from config import settings
+from core.observability import get_logger
+
+log = get_logger("voice")
 
 
 async def speak_in_channel(
@@ -17,7 +20,7 @@ async def speak_in_channel(
     try:
         import edge_tts
     except ImportError:
-        print("[voice] edge-tts is not installed — run: pip install edge-tts")
+        log.error("edge_tts_missing", hint="pip install edge-tts")
         return False
 
     if not guild:
@@ -36,7 +39,7 @@ async def speak_in_channel(
             voice_channel = ch
 
     if voice_channel is None:
-        print(f"[voice] no voice channel found in guild {guild.id}")
+        log.warning("no_voice_channel", guild_id=guild.id)
         return False
 
     # Synthesise speech to a temporary MP3 file.
@@ -47,7 +50,7 @@ async def speak_in_channel(
         communicate = edge_tts.Communicate(text, "en-US-JennyNeural")
         await communicate.save(tmp_path)
     except Exception as exc:
-        print(f"[voice] TTS synthesis failed: {exc}")
+        log.error("tts_synthesis_failed", error=str(exc))
         os.unlink(tmp_path)
         return False
 
@@ -58,14 +61,14 @@ async def speak_in_channel(
 
         def _after(error):
             if error:
-                print(f"[voice] playback error: {error}")
+                log.error("playback_error", error=str(error))
             done.set()
 
         vc.play(discord.FFmpegPCMAudio(tmp_path), after=_after)
         await done.wait()
         return True
     except Exception as exc:
-        print(f"[voice] playback failed: {exc}")
+        log.error("playback_failed", error=str(exc))
         return False
     finally:
         if vc and vc.is_connected():
