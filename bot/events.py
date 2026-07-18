@@ -1,11 +1,9 @@
 import asyncio
-import json
 import re
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Optional, Union
 
-import aiosqlite
 import discord
 from discord import app_commands
 
@@ -18,7 +16,7 @@ from core.message_parser import ComplexityAnalyzer
 from core.observability import get_logger, metrics
 from integrations.google_calendar import google_calendar
 from integrations.voice_tts import speak_in_channel
-from storage.models import HouseholdMember
+from storage.repositories import chore_repo, member_repo, todo_repo
 from tasks.reminder import reminder_manager
 from tasks.scheduler import init_scheduler, schedule_reminder, unschedule_reminder
 
@@ -220,19 +218,13 @@ async def _do_create_chore(action: dict, source: discord.Message):
     assigned_id = await _resolve_user_id(
         action.get("assigned_to", ""), source.guild, fallback_id=None
     )
-    async with aiosqlite.connect(settings.db_path) as db:
-        await db.execute(
-            """INSERT INTO chore_tasks (channel_id, name, description, assigned_user_id, cron_expression)
-               VALUES (?, ?, ?, ?, ?)""",
-            (
-                source.channel.id,
-                action.get("name", "Unnamed chore"),
-                action.get("description", ""),
-                assigned_id,
-                cron,
-            ),
-        )
-        await db.commit()
+    await chore_repo.create(
+        channel_id=source.channel.id,
+        name=action.get("name", "Unnamed chore"),
+        description=action.get("description", ""),
+        assigned_user_id=assigned_id,
+        cron_expression=cron,
+    )
     await _sync_household_context()
 
 
@@ -243,34 +235,16 @@ async def _do_update_profile(action: dict, source: discord.Message):
     updates = action.get("updates") or {}
     if not updates or not target_id:
         return
-    async with aiosqlite.connect(settings.db_path) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT profile FROM household_members WHERE discord_id=?", (target_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        if not row:
-            return
-        existing = json.loads(row["profile"] or "{}")
-        existing.update(updates)
-        await db.execute(
-            "UPDATE household_members SET profile=? WHERE discord_id=?",
-            (json.dumps(existing), target_id),
-        )
-        await db.commit()
+    if not await member_repo.merge_profile(target_id, updates):
+        return
     await _sync_household_context()
 
 
 async def _do_complete_chore(action: dict, source: discord.Message):
-    name = action.get("name", "").strip().lower()
+    name = action.get("name", "").strip()
     if not name:
         return
-    async with aiosqlite.connect(settings.db_path) as db:
-        await db.execute(
-            "UPDATE chore_tasks SET last_completed=? WHERE lower(name)=? AND is_active=1",
-            (datetime.utcnow().isoformat(), name),
-        )
-        await db.commit()
+    await chore_repo.complete_by_name(name)
 
 
 async def _do_create_calendar_event(action: dict, source: discord.Message):
@@ -296,18 +270,10 @@ async def _do_create_calendar_event(action: dict, source: discord.Message):
     attendee_emails: list[str] = []
     for mention in action.get("attendees") or []:
         username = mention.lstrip("@").lower()
-        async with aiosqlite.connect(settings.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT profile FROM household_members WHERE lower(username)=? OR lower(display_name)=?",
-                (username, username),
-            ) as cur:
-                row = await cur.fetchone()
-        if row:
-            profile = json.loads(row["profile"] or "{}")
-            email = profile.get("google_email")
-            if email:
-                attendee_emails.append(email)
+        profile = await member_repo.find_profile_by_name(username)
+        email = (profile or {}).get("google_email")
+        if email:
+            attendee_emails.append(email)
 
     ok = await google_calendar.create_event(
         title=action.get("title", "Untitled event"),
@@ -402,20 +368,14 @@ async def cmd_reminders(interaction: discord.Interaction):
 
 @bot.tree.command(name="show_chores", description="List active household chores")
 async def cmd_show_chores(interaction: discord.Interaction):
-    async with aiosqlite.connect(settings.db_path) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM chore_tasks WHERE channel_id=? AND is_active=1 ORDER BY name",
-            (interaction.channel_id,),
-        ) as cur:
-            rows = await cur.fetchall()
+    rows = await chore_repo.list_active(interaction.channel_id)
     if not rows:
         await interaction.response.send_message("No chores scheduled.", ephemeral=True)
         return
     lines = []
     for r in rows:
         assignee = f" — <@{r['assigned_user_id']}>" if r["assigned_user_id"] else ""
-        done = f" — last done {r['last_completed'][:10]}" if r["last_completed"] else ""
+        done = f" — last done {r['last_completed']:%Y-%m-%d}" if r["last_completed"] else ""
         lines.append(f"- **{r['name']}** [{r['cron_expression']}]{assignee}{done}")
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
@@ -447,19 +407,13 @@ async def cmd_create_chore(interaction: discord.Interaction, description: str):
     assigned_id = await _resolve_user_id(
         chore_action.get("assigned_to", ""), interaction.guild, fallback_id=None
     )
-    async with aiosqlite.connect(settings.db_path) as db:
-        await db.execute(
-            """INSERT INTO chore_tasks (channel_id, name, description, assigned_user_id, cron_expression)
-               VALUES (?, ?, ?, ?, ?)""",
-            (
-                interaction.channel_id,
-                chore_action.get("name", "Unnamed chore"),
-                chore_action.get("description", ""),
-                assigned_id,
-                chore_action.get("cron"),
-            ),
-        )
-        await db.commit()
+    await chore_repo.create(
+        channel_id=interaction.channel_id,
+        name=chore_action.get("name", "Unnamed chore"),
+        description=chore_action.get("description", ""),
+        assigned_user_id=assigned_id,
+        cron_expression=chore_action.get("cron"),
+    )
     await _sync_household_context()
     await interaction.followup.send(reply_text or f"Added: {chore_action.get('name')}")
 
@@ -471,12 +425,7 @@ async def cmd_create_chore(interaction: discord.Interaction, description: str):
 )
 async def cmd_create_todo(interaction: discord.Interaction, title: str, assigned_to: str = ""):
     user_ids = await _resolve_user_ids(assigned_to, interaction.guild)
-    async with aiosqlite.connect(settings.db_path) as db:
-        await db.execute(
-            "INSERT INTO todos (channel_id, title, assigned_user_ids) VALUES (?, ?, ?)",
-            (interaction.channel_id, title.strip(), json.dumps(user_ids)),
-        )
-        await db.commit()
+    await todo_repo.create(interaction.channel_id, title.strip(), user_ids)
     mentions = " ".join(f"<@{uid}>" for uid in user_ids) if user_ids else ""
     suffix = f" — {mentions}" if mentions else ""
     await interaction.response.send_message(f"Added to-do: **{title}**{suffix}")
@@ -484,18 +433,8 @@ async def cmd_create_todo(interaction: discord.Interaction, title: str, assigned
 
 @bot.tree.command(name="summary", description="Show all to-dos and recurring chores")
 async def cmd_summary(interaction: discord.Interaction):
-    async with aiosqlite.connect(settings.db_path) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM todos WHERE channel_id=? AND is_active=1 ORDER BY created_at",
-            (interaction.channel_id,),
-        ) as cur:
-            todos = [dict(r) for r in await cur.fetchall()]
-        async with db.execute(
-            "SELECT * FROM chore_tasks WHERE channel_id=? AND is_active=1 ORDER BY name",
-            (interaction.channel_id,),
-        ) as cur:
-            chores = [dict(r) for r in await cur.fetchall()]
+    todos = await todo_repo.list_active(interaction.channel_id)
+    chores = await chore_repo.list_active(interaction.channel_id)
 
     if not todos and not chores:
         await interaction.response.send_message("Nothing on the list yet!", ephemeral=True)
@@ -506,7 +445,7 @@ async def cmd_summary(interaction: discord.Interaction):
     if todos:
         lines.append("📋 **To-Do**")
         for t in todos:
-            uids = json.loads(t["assigned_user_ids"] or "[]")
+            uids = t["assigned_user_ids"] or []
             mentions = " ".join(f"<@{uid}>" for uid in uids) if uids else "*(unassigned)*"
             lines.append(f"- {t['title']} — {mentions}")
 
@@ -516,7 +455,7 @@ async def cmd_summary(interaction: discord.Interaction):
         lines.append("🔄 **Recurring Chores**")
         for r in chores:
             assignee = f"<@{r['assigned_user_id']}>" if r["assigned_user_id"] else "*(unassigned)*"
-            done = f" — last done {r['last_completed'][:10]}" if r["last_completed"] else ""
+            done = f" — last done {r['last_completed']:%Y-%m-%d}" if r["last_completed"] else ""
             lines.append(f"- **{r['name']}** [{r['cron_expression']}] — {assignee}{done}")
 
     await interaction.response.send_message("\n".join(lines))
@@ -525,17 +464,11 @@ async def cmd_summary(interaction: discord.Interaction):
 @bot.tree.command(name="remove_chore", description="Remove a recurring chore")
 @app_commands.describe(name="Name of the chore to remove (partial name is fine)")
 async def cmd_remove_chore(interaction: discord.Interaction, name: str):
-    async with aiosqlite.connect(settings.db_path) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT id, name FROM chore_tasks WHERE channel_id=? AND is_active=1",
-            (interaction.channel_id,),
-        ) as cur:
-            rows = await cur.fetchall()
+    candidates = await chore_repo.find_active(interaction.channel_id)
 
-    match = _fuzzy_match(name, [(r["id"], r["name"]) for r in rows])
+    match = _fuzzy_match(name, candidates)
     if not match:
-        options = ", ".join(f"**{r['name']}**" for r in rows) or "none"
+        options = ", ".join(f"**{cname}**" for _, cname in candidates) or "none"
         await interaction.response.send_message(
             f"Couldn't find a chore matching **{name}**. Active chores: {options}",
             ephemeral=True,
@@ -543,9 +476,7 @@ async def cmd_remove_chore(interaction: discord.Interaction, name: str):
         return
 
     rid, rname = match
-    async with aiosqlite.connect(settings.db_path) as db:
-        await db.execute("UPDATE chore_tasks SET is_active=0 WHERE id=?", (rid,))
-        await db.commit()
+    await chore_repo.deactivate(rid)
     await _sync_household_context()
     await interaction.response.send_message(f"Removed chore: **{rname}**")
 
@@ -553,17 +484,11 @@ async def cmd_remove_chore(interaction: discord.Interaction, name: str):
 @bot.tree.command(name="remove_todo", description="Remove a to-do task")
 @app_commands.describe(title="Title of the to-do to remove (partial name is fine)")
 async def cmd_remove_todo(interaction: discord.Interaction, title: str):
-    async with aiosqlite.connect(settings.db_path) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT id, title FROM todos WHERE channel_id=? AND is_active=1",
-            (interaction.channel_id,),
-        ) as cur:
-            rows = await cur.fetchall()
+    candidates = await todo_repo.find_active(interaction.channel_id)
 
-    match = _fuzzy_match(title, [(r["id"], r["title"]) for r in rows])
+    match = _fuzzy_match(title, candidates)
     if not match:
-        options = ", ".join(f"**{r['title']}**" for r in rows) or "none"
+        options = ", ".join(f"**{ctitle}**" for _, ctitle in candidates) or "none"
         await interaction.response.send_message(
             f"Couldn't find a to-do matching **{title}**. Active to-dos: {options}",
             ephemeral=True,
@@ -571,9 +496,7 @@ async def cmd_remove_todo(interaction: discord.Interaction, title: str):
         return
 
     rid, rtitle = match
-    async with aiosqlite.connect(settings.db_path) as db:
-        await db.execute("UPDATE todos SET is_active=0 WHERE id=?", (rid,))
-        await db.commit()
+    await todo_repo.deactivate(rid)
     await interaction.response.send_message(f"Removed to-do: **{rtitle}**")
 
 
@@ -634,16 +557,10 @@ async def _resolve_user_ids(names_str: str, guild: Optional[discord.Guild]) -> l
 
 
 async def _all_member_mentions() -> str:
-    async with aiosqlite.connect(settings.db_path) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT discord_id FROM household_members WHERE is_active=1"
-        ) as cur:
-            rows = await cur.fetchall()
     parts = []
-    for r in rows:
-        user = bot.get_user(r["discord_id"])
-        parts.append(user.mention if user else f"<@{r['discord_id']}>")
+    for uid in await member_repo.active_ids():
+        user = bot.get_user(uid)
+        parts.append(user.mention if user else f"<@{uid}>")
     return " ".join(parts) if parts else "@here"
 
 
@@ -657,49 +574,13 @@ def _parse_dt(raw: str) -> Optional[datetime]:
 
 
 async def _upsert_member(user: Union[discord.Member, discord.User]):
-    async with aiosqlite.connect(settings.db_path) as db:
-        await db.execute(
-            """INSERT INTO household_members (discord_id, username, display_name)
-               VALUES (?, ?, ?)
-               ON CONFLICT(discord_id) DO UPDATE SET
-                 username=excluded.username,
-                 display_name=excluded.display_name""",
-            (user.id, user.name, getattr(user, "display_name", user.name)),
-        )
-        await db.commit()
+    await member_repo.upsert(user.id, user.name, getattr(user, "display_name", user.name))
 
 
 async def _sync_household_context():
     """Refresh gemini_client's cached household section from the database."""
-    async with aiosqlite.connect(settings.db_path) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT username, display_name, profile FROM household_members WHERE is_active=1"
-        ) as cur:
-            members = [dict(r) for r in await cur.fetchall()]
-        async with db.execute(
-            "SELECT name, description, cron_expression, assigned_user_id FROM chore_tasks WHERE is_active=1"
-        ) as cur:
-            chores_raw = [dict(r) for r in await cur.fetchall()]
-
-    # Enrich chores with assigned username
-    chores = []
-    for c in chores_raw:
-        entry = dict(c)
-        if c["assigned_user_id"]:
-            match = next((m for m in members if True), None)
-            async with aiosqlite.connect(settings.db_path) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute(
-                    "SELECT username FROM household_members WHERE discord_id=?",
-                    (c["assigned_user_id"],),
-                ) as cur:
-                    row = await cur.fetchone()
-                    entry["assigned_username"] = row["username"] if row else None
-        else:
-            entry["assigned_username"] = None
-        chores.append(entry)
-
+    members = await member_repo.active_members()
+    chores = await chore_repo.list_all_active()  # includes assigned_username
     gemini_client.update_household(members, chores)
 
 

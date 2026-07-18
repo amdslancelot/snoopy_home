@@ -18,7 +18,7 @@ Two constraints from the artifact worth keeping in mind: **CPU is the binding re
 
 Three deltas between the artifact and this repo today:
 
-1. **Database** — the artifact puts `chores` on shared Postgres; the bot currently uses SQLite (`aiosqlite`). The plan runs SQLite on a PVC per environment first, and treats the Postgres migration as a separate later phase (it requires a code change in `storage/`).
+1. **Database** — resolved: the bot now runs on PostgreSQL (asyncpg, `storage/`), matching the artifact. Each environment gets its own database + role on the shared Postgres 17 in namespace `data`: prod `chores`/`chores_rw`, staging `chores_staging`/`chores_staging_rw`, each role confined to its own database, pool ≤ 5 connections per instance. Versioned migrations (`storage/migrations/*.sql`) run automatically at pod startup. No PVC is needed — the pod is stateless.
 2. **Ingress** — the artifact routes `chores.example.com`, but the bot's only HTTP surface is an internal health/metrics port (8080: `/health`, `/ready`, `/metrics`); Discord is an outbound WebSocket and Gemini is an outbound API call. The port feeds the liveness/readiness probes and (later) Prometheus scraping — no Ingress or Service is created until the bot grows a user-facing web UI.
 3. **Environments** — the artifact describes a single production cluster and defines no staging. The staging environment below is this plan's addition, carved out of the `chores` CPU allocation (see the node-budget note under Environments).
 
@@ -29,7 +29,7 @@ Three deltas between the artifact and this repo today:
 | Namespace | `chores-staging` | `chores` |
 | Discord bot | **separate Discord application** + token, invited only to a test server | the real bot |
 | Gemini key | separate API key (keeps quota/billing visible per env) | production key |
-| Database | SQLite on PVC `snoopy-data` in `chores-staging` | SQLite on PVC `snoopy-data` in `chores` |
+| Database | `chores_staging` (role `chores_staging_rw`) on `postgres.data.svc` | `chores` (role `chores_rw`) on `postgres.data.svc` |
 | Image tag | `localhost/snoopy-home:<git-sha>` , auto-deployed | the same `<git-sha>` tag, promoted — never rebuilt |
 | Deploy trigger | every push to `main` (after tests) | manual promotion with approval |
 | Resources | requests 50m / 128 Mi, limits 200m / 256 Mi | requests 100m / 128 Mi, limits 200m / 256 Mi |
@@ -45,7 +45,6 @@ deploy/k8s/
   base/
     kustomization.yaml
     deployment.yaml
-    pvc.yaml
   overlays/
     staging/
       kustomization.yaml   # namespace: chores-staging, staging resource patch
@@ -63,7 +62,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate        # never two bots at once: duplicate replies + SQLite contention
+    type: Recreate        # never two bots at once: duplicate replies on one token
   selector:
     matchLabels: { app: chores }
   template:
@@ -75,12 +74,9 @@ spec:
           image: localhost/snoopy-home:latest   # tag overridden per overlay
           imagePullPolicy: Never                # image is imported into containerd, never pulled
           envFrom:
-            - secretRef: { name: chores-secrets }
+            - secretRef: { name: chores-secrets }   # includes DATABASE_URL
           env:
             - { name: PYTHONUNBUFFERED, value: "1" }
-            - { name: DB_PATH, value: /data/snoopy_home.db }
-          volumeMounts:
-            - { name: data, mountPath: /data }
           ports:
             - { name: http, containerPort: 8080 }
           livenessProbe:
@@ -94,14 +90,11 @@ spec:
           resources:
             requests: { cpu: 100m, memory: 128Mi }
             limits:   { cpu: 200m, memory: 256Mi }
-      volumes:
-        - name: data
-          persistentVolumeClaim: { claimName: snoopy-data }
 ```
 
 `strategy: Recreate` and `replicas: 1` are load-bearing, not defaults to tune later — a rolling update would briefly run two copies of the bot on one token.
 
-`pvc.yaml` is a 1 Gi `local-path` PVC named `snoopy-data`; each overlay sets its namespace so staging and prod get independent volumes. The probes target the bot's built-in health server (`web/health.py`): `/health` is pure liveness (process + event loop alive), `/ready` also checks the Discord connection, the database, and the scheduler.
+The pod is stateless (all state lives in the shared Postgres), so there is no PVC. The probes target the bot's built-in health server (`web/health.py`): `/health` is pure liveness (process + event loop alive), `/ready` also checks the Discord connection, the database, and the scheduler. Migrations (`python -m storage.migrate` semantics) run automatically at startup before the bot connects.
 
 ## Secrets
 
@@ -112,7 +105,7 @@ kubectl -n chores-staging create secret generic chores-secrets --from-env-file=e
 kubectl -n chores         create secret generic chores-secrets --from-env-file=env.prod
 ```
 
-`env.staging` carries the staging Discord token and staging Gemini key; `env.prod` carries the real ones. `GOOGLE_SA_JSON_B64` works unchanged — `entrypoint.sh` decodes it at container start in either environment. Delete the env files from disk after creating the secrets, or keep them only in `~/` with `chmod 600` as `~/.env.snoopy` is kept today.
+`env.staging` carries the staging Discord token, staging Gemini key, and `DATABASE_URL=postgresql://chores_staging_rw:<pw>@postgres.data.svc:5432/chores_staging`; `env.prod` carries the real token/key and `DATABASE_URL=postgresql://chores_rw:<pw>@postgres.data.svc:5432/chores`. `GOOGLE_SA_JSON_B64` works unchanged — `entrypoint.sh` decodes it at container start in either environment. Delete the env files from disk after creating the secrets, or keep them only in `~/` with `chmod 600` as `~/.env.snoopy` is kept today.
 
 ## CI/CD
 
@@ -145,12 +138,12 @@ Design decisions:
 
 ## Cutover phases
 
-- [ ] **Phase 0 — prerequisites.** k3s node up per the artifact (Traefik, cert-manager, local-path). Clone the repo onto the node (`git clone <repo-url> ~/snoopy_home` — the CI job's `git pull` assumes it exists). Give the deploy user working `kubectl`: a default k3s install writes `/etc/rancher/k3s/k3s.yaml` root-owned 0600, so bare `kubectl` fails for a non-root SSH user — either copy it to `~/.kube/config` (chowned to the user) or install k3s with `--write-kubeconfig-mode 644`; the CI job also needs passwordless sudo for `k3s ctr images import`. Create the staging Discord application in the Developer Portal, enable both privileged intents (Server Members + Message Content), invite it to a test server. Create a staging Gemini API key.
+- [ ] **Phase 0 — prerequisites.** k3s node up per the artifact (Traefik, cert-manager, local-path), shared Postgres 17 StatefulSet up in namespace `data`. Create both databases and roles on it (`CREATE DATABASE chores; CREATE ROLE chores_rw LOGIN PASSWORD '...'; GRANT ALL ON DATABASE chores TO chores_rw;` and the same for `chores_staging`/`chores_staging_rw` — each role confined to its own database). Clone the repo onto the node (`git clone <repo-url> ~/snoopy_home` — the CI job's `git pull` assumes it exists). Give the deploy user working `kubectl`: a default k3s install writes `/etc/rancher/k3s/k3s.yaml` root-owned 0600, so bare `kubectl` fails for a non-root SSH user — either copy it to `~/.kube/config` (chowned to the user) or install k3s with `--write-kubeconfig-mode 644`; the CI job also needs passwordless sudo for `k3s ctr images import`. Create the staging Discord application in the Developer Portal, enable both privileged intents (Server Members + Message Content), invite it to a test server. Create a staging Gemini API key.
 - [ ] **Phase 1 — manifests.** Add `deploy/k8s/` base + overlays to the repo. Create both namespaces (`kubectl create namespace chores-staging`, `kubectl create namespace chores` — `apply -k` does not create them) and both `chores-secrets`. Nothing deployed yet; `kubectl apply -k` dry-run passes.
 - [ ] **Phase 2 — staging live.** Replace the `deploy` job in `.github/workflows/deploy.yml` with `deploy-staging`; add the `promote` workflow and the `production` GitHub Environment. Push to `main`, verify the staging bot responds in the test server and a reminder fires.
-- [ ] **Phase 3 — prod cutover.** Order matters: the prod PVC's host directory does not exist until the PVC is provisioned, which local-path only does once a pod is scheduled against it — so the copy cannot come first. The sequence: (1) stop the Quadlet service on the old VM (`systemctl --user stop snoopy-home`) — two bots on one token must never overlap, so the old bot goes down before the new one comes up; (2) promote to prod (the promote workflow runs `apply -k` + `set image` with the staging-verified sha), letting the bot start once with an empty database — this provisions the PVC; (3) `kubectl -n chores scale deploy/chores --replicas=0`; (4) copy `snoopy_home.db` from the Quadlet volume into the PVC's host directory — find it with `kubectl get pv $(kubectl -n chores get pvc snoopy-data -o jsonpath='{.spec.volumeName}') -o jsonpath='{.spec.hostPath.path}'` (k3s local-path lives under `/var/lib/rancher/k3s/storage/`); (5) `kubectl -n chores scale deploy/chores --replicas=1`, verify with the real bot. Then retire the Quadlet permanently: on OL9, remove `~/.config/containers/systemd/snoopy-home.container` and run `systemctl --user daemon-reload` — Quadlet units are generated from the `.container` file and auto-enabled, so `systemctl --user disable` does not stick; on OL8, `systemctl --user disable --now snoopy-home`.
+- [ ] **Phase 3 — prod cutover.** The sequence: (1) stop the Quadlet service on the old VM (`systemctl --user stop snoopy-home`) — two bots on one token must never overlap, so the old bot goes down before the new one comes up; (2) apply the schema to the prod database: `python -m storage.migrate` with `DATABASE_URL` pointing at `chores` (or just let step 4's pod do it at startup); (3) move the data: copy `snoopy_home.db` off the old VM and run `python scripts/migrate_sqlite_to_pg.py --sqlite snoopy_home.db --pg postgresql://chores_rw:<pw>@<node>:.../chores` — it prints per-table source/dest row counts and exits non-zero on any mismatch; keep the SQLite file as the rollback artifact; (4) promote to prod (the promote workflow runs `apply -k` + `set image` with the staging-verified sha) and verify with the real bot. Then retire the Quadlet permanently: on OL9, remove `~/.config/containers/systemd/snoopy-home.container` and run `systemctl --user daemon-reload` — Quadlet units are generated from the `.container` file and auto-enabled, so `systemctl --user disable` does not stick; on OL8, `systemctl --user disable --now snoopy-home`.
 - [ ] **Phase 4 — decommission.** Retire the old VM (or the old service, if the k3s node is the same VM re-imaged). Mark DEPLOY.md as historical.
-- [ ] **Phase 5 (later) — Postgres.** Move storage from SQLite to the shared Postgres 17 per the artifact: create database `chores` + role `chores_rw` (and `chores_staging` + `chores_staging_rw` for staging), port `storage/` from `aiosqlite` to an async Postgres driver, keep the pool at 5–10 connections per the artifact's connection budget (all apps together sit at ~45 of Postgres's default 100 connections; the artifact's escape hatch if that climbs is PgBouncer in transaction mode, not bigger pools). One-time data move via a script over the SQLite file. This phase is independent of the staging/prod split and can happen any time after Phase 3.
+- [x] **Phase 5 — Postgres.** Done ahead of schedule, in the codebase rather than at cutover: `storage/` now runs on asyncpg with `asyncpg.create_pool(min_size=1, max_size=5)` per the artifact's connection budget (all apps together sit at ~45 of Postgres's default 100 connections; the escape hatch if that climbs is PgBouncer in transaction mode, not bigger pools). Versioned migrations live in `storage/migrations/`; the one-time data move is `scripts/migrate_sqlite_to_pg.py` (Phase 3 step 3). See `docs/storage.md`.
 
 ## Everyday operations (post-cutover)
 
@@ -163,4 +156,4 @@ Design decisions:
 | Roll back | `kubectl -n chores rollout undo deploy/chores` |
 | Stop staging (free CPU) | `kubectl -n chores-staging scale deploy/chores --replicas=0` |
 | Shell into container | `kubectl -n chores exec -it deploy/chores -- sh` |
-| Inspect SQLite | `kubectl -n chores exec -it deploy/chores -- sqlite3 /data/snoopy_home.db` (or open the local-path dir on the host) |
+| Inspect the database | `kubectl -n data exec -it statefulset/postgres -- psql -U chores_rw chores` |

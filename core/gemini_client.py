@@ -626,7 +626,9 @@ class GeminiClient:
     def update_household(self, members: list[dict], chores: list[dict]):
         """Rebuild the household section and invalidate caches if it changed."""
         def _member_line(m: dict) -> str:
-            profile = _json.loads(m.get("profile") or "{}")
+            profile = m.get("profile") or {}
+            if isinstance(profile, str):  # legacy JSON-string form
+                profile = _json.loads(profile or "{}")
             profile_str = " | ".join(f"{k}: {v}" for k, v in profile.items() if v)
             profile_part = f"  [{profile_str}]" if profile_str else ""
             return f"  - {m['display_name']} (@{m['username']}){profile_part}"

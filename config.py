@@ -17,6 +17,10 @@ class Settings(BaseSettings):
         return None if v == "" else v
 
     bot_name: str = "Snoopy"
+    # Local dev: podman run -d --name snoopy-pg -e POSTGRES_PASSWORD=dev \
+    #   -e POSTGRES_DB=chores -p 5432:5432 postgres:17
+    database_url: str = "postgresql://postgres:dev@localhost:5432/chores"
+    # Legacy SQLite file — read only by scripts/migrate_sqlite_to_pg.py
     db_path: str = "snoopy_home.db"
     timezone: str = "UTC"
 

@@ -38,7 +38,8 @@ Phase order rationale: monitoring first (zero risk, instruments everything after
 
 **Done when:** baseline report of the legacy `<action>` protocol committed to `docs/evals.md`; nightly workflow green.
 
-## [ ] Phase 3 — PostgreSQL replaces SQLite (~700 LOC)
+## [x] Phase 3 — PostgreSQL replaces SQLite (~700 LOC)
+> Landed. Data-move rehearsed on the real snoopy_home.db: counts match, rerun is a no-op.
 
 **Stack:** plain `asyncpg` + raw SQL (placeholders `?` → `$1`), no ORM. Migrations: numbered `.sql` files in `storage/migrations/` applied by a ~30-line runner tracking state in `schema_migrations`. Pool per the k3s budget: `asyncpg.create_pool(min_size=1, max_size=5)`, database `chores`, role `chores_rw`.
 
