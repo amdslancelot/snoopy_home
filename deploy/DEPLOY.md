@@ -1,5 +1,7 @@
 # Deployment Guide — snoopy_home on OCI (Oracle Linux 8 / 9)
 
+> **Note:** this guide covers the current single-environment Podman/Quadlet deployment. The plan for moving to **staging + prod** on the single-node k3s cluster is in [DEPLOY-K3S.md](DEPLOY-K3S.md).
+
 Target: OCI VM running Oracle Linux 8 or 9. No Docker, no OCIR needed — `setup-vm.sh` installs Podman via `dnf`.
 CI/CD: GitHub Actions tests → SSH into VM → git pull → build image locally → systemd restart.
 
