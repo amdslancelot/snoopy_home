@@ -5,14 +5,13 @@ upgrade (`docs/UPGRADE-PLAN.md`). The code is DB-agnostic between
 orchestration paths — moving prod to a different orchestrator later is just
 a new `DATABASE_URL` and deploy pipeline, not a code change.
 
-**Environment split:** prod runs on the OCI VM; staging runs on **minikube
-on the local Mac laptop**, entirely decoupled from prod's infrastructure.
-This means k3s is no longer a prerequisite for having a staging
-environment — minikube gives real Kubernetes namespacing for free, locally,
-without touching the shared prod box. `deploy/PLAN-DEPLOY-K3S.md`'s original plan
-assumed staging and prod co-located on one k3s node; that assumption is
-superseded by this split. k3s for prod itself remains a possible later move,
-but it's now an independent decision, not something staging depends on.
+**Environment split:** prod runs on **single-node k3s** on a fresh OCI
+A1.Flex node; staging runs on **minikube on the local Mac laptop**, entirely
+decoupled from prod's infrastructure. The two are separate clusters — minikube
+gives staging real Kubernetes namespacing for free, locally, without touching
+the prod box. `deploy/PLAN-DEPLOY-K3S.md`'s original plan co-located staging and
+prod on one k3s node; that assumption is superseded by this split (staging on
+minikube, prod on its own k3s node).
 
 **Dev and staging share one Postgres instance, on purpose.** Both run
 locally on the same Mac, so as of 2026-07-19 there is a single `postgres:17`
@@ -31,98 +30,21 @@ simultaneously** — two schedulers against the same rows will race on
 reminders and chore/todo state, the same hazard `PLAN-DEPLOY-K3S.md` calls out
 for any shared database.
 
-## 1. Provisioning Postgres on prod (OCI VM)
+## 1. Prod — single-node k3s on the OCI node
 
-> **⚠️ Superseded.** This section described provisioning Postgres as a
-> Podman/Quadlet container alongside the bot on the existing VM. Prod has since
-> moved to **single-node k3s on a fresh OCI A1.Flex node**, with Postgres as the
-> shared `data`-namespace Deployment (`deploy/k8s/postgres.yaml`) instead of a
-> Quadlet. Follow **[prod-k3s-runbook.md](prod-k3s-runbook.md)** for the current
-> cutover. The Podman/Quadlet notes below are retained only for the old box until
-> it is decommissioned. §2 (staging on minikube) and §3 (dev) remain current.
+Prod runs on **single-node k3s** on a fresh OCI A1.Flex node: the bot in
+namespace `snoopy`, backed by the shared Postgres 17 in namespace `data`
+(`deploy/k8s/postgres.yaml`), rolled out by the `v*`-tag-gated CI job in
+`.github/workflows/deploy.yml`. The full provisioning + cutover procedure —
+install k3s, provision Postgres + the `snoopy_home`/`snoopy_rw` database, stop
+the old bot, migrate SQLite→Postgres, deploy, verify — is
+**[prod-k3s-runbook.md](prod-k3s-runbook.md)**; the design rationale is
+`deploy/PLAN-DEPLOY-K3S.md`.
 
-The only genuinely new infrastructure requirement from the upgrade is
-**Postgres** on the VM that's already running the bot. Single-VM +
-Podman/Quadlet stays the right choice here — it's the existing live setup,
-and the original reason to consider k3s for prod (clean staging isolation)
-no longer applies since staging lives on minikube instead.
-
-### Steps (on the OCI VM, as `opc`)
-
-```bash
-# 1. Shared network so the bot container can reach Postgres by name
-podman network create snoopy-net
-
-# 2. Postgres 17 as a Quadlet unit with a persistent volume
-mkdir -p ~/.config/containers/systemd
-cat > ~/.config/containers/systemd/snoopy-pg.container <<'EOF'
-[Unit]
-Description=Postgres 17 for Snoopy Home
-[Container]
-Image=docker.io/library/postgres:17
-ContainerName=snoopy-pg
-Network=snoopy-net
-Volume=snoopy-pgdata:/var/lib/postgresql/data
-EnvironmentFile=%h/.env.postgres
-[Service]
-Restart=always
-[Install]
-WantedBy=default.target
-EOF
-
-# ~/.env.postgres (chmod 600) — superuser bootstrap only
-printf 'POSTGRES_PASSWORD=%s\n' 'STRONG_SUPERUSER_PW' > ~/.env.postgres
-chmod 600 ~/.env.postgres
-
-systemctl --user daemon-reload && systemctl --user start snoopy-pg
-```
-
-Create the app database **owned by the app role** — this sidesteps the
-Postgres 15+ gotcha where a plain `GRANT ALL ON DATABASE` still can't
-`CREATE TABLE` in the `public` schema; ownership avoids it and migrations
-run cleanly:
-
-```bash
-podman exec -it snoopy-pg psql -U postgres -c \
-  "CREATE ROLE snoopy_rw LOGIN PASSWORD 'STRONG_APP_PW';" -c \
-  "CREATE DATABASE snoopy_home OWNER snoopy_rw;"
-```
-
-Then in `~/.env.snoopy`:
-
-```
-DATABASE_URL=postgresql://snoopy_rw:STRONG_APP_PW@snoopy-pg:5432/snoopy_home
-```
-
-Both containers must share the network — add `Network=snoopy-net` to the
-bot's own `.container` unit too. No PVC/volume needed for the bot anymore —
-it's stateless (all state lives in Postgres).
-
-### Data migration
-
-Stop the old bot first — never run two bots on one Discord token
-simultaneously. Then:
-
-```bash
-python scripts/migrate_sqlite_to_pg.py \
-  --sqlite snoopy_home.db \
-  --pg "postgresql://snoopy_rw:STRONG_APP_PW@localhost:5432/snoopy_home"
-```
-
-It verifies row counts per table and exits non-zero on any mismatch. Schema
-is created automatically — `main.py` runs migrations at startup, or run
-`python -m storage.migrate` manually first.
-
-### Before the first prod deploy
-
-Two things must be fixed or the next push crashes the bot on startup:
-
-1. **CI `deploy` job** needs `DATABASE_URL` present in `~/.env.snoopy` on the
-   VM, and the bot's Quadlet unit needs the shared network wired in
-   (`Network=snoopy-net`).
-2. **Env example files** (`.env.example`, `deploy/env.snoopy.example`) still
-   document `DB_PATH`/SQLite only — they should be updated to show
-   `DATABASE_URL` so future setup doesn't regress to SQLite.
+The earlier single-VM Podman/Quadlet path (bot + a `snoopy-pg` Quadlet Postgres,
+`~/.env.snoopy`, `systemctl --user restart`) has been removed now that k3s
+supersedes it; `git log` retains it if you need to operate the old box before it
+is decommissioned.
 
 ## 2. Staging — minikube on the local Mac
 
@@ -233,15 +155,15 @@ Verify staging by talking to the staging bot in a test server: set a
 reminder, confirm it fires; smoke-test a tools-mode query (e.g. "what
 chores do we have?") to confirm function calling works end-to-end.
 
-### `deploy/k8s/` manifests — still to author
+### `deploy/k8s/` manifests
 
-Base Deployment + staging/prod overlays don't exist in the repo yet (see
-`deploy/PLAN-DEPLOY-K3S.md`'s "Repo layout to add"). Since minikube is a real
-Kubernetes cluster, the same base manifest works for both a future
-prod-on-k3s and staging-on-minikube — only the target context differs
-(`kubectl config use-context minikube` vs whatever the OCI k3s node uses).
-Writing these is the next concrete step before the `kubectl apply` commands
-above will actually work.
+The bot's base Deployment + prod overlay now exist (`deploy/k8s/base`,
+`deploy/k8s/overlays/prod`). Since minikube is a real Kubernetes cluster, the
+same base manifest serves both prod-on-k3s and staging-on-minikube — only the
+target context differs (`kubectl config use-context minikube` vs the OCI k3s
+node). A dedicated staging overlay isn't in the repo yet; the `kubectl apply -k
+overlays/staging` command above is aspirational until one is added (staging can
+apply the base directly in the meantime).
 
 ## 3. Running the app: dev / stage / prod, summarized
 
@@ -288,15 +210,16 @@ See §2 above — `minikube start` → build/load image → `kubectl apply -k
 overlays/staging` → verify in a test Discord server, all run manually from
 the laptop.
 
-### Prod (OCI VM)
+### Prod (OCI k3s node)
 
 ```bash
-git push origin main
-# CI: tests → SSH to VM → git pull → podman build → systemctl --user restart snoopy-home
+git tag v1.2.0 && git push origin v1.2.0
+# CI: tests → SSH to node → podman build → k3s ctr images import → apply -k → set image → rollout status
 ```
 
-Observe: `sudo journalctl CONTAINER_NAME=systemd-snoopy-home -f` and
-`curl localhost:8080/ready`.
+Observe: `kubectl -n snoopy logs deploy/snoopy -f` and
+`kubectl -n snoopy rollout status deploy/snoopy`. Full procedure:
+[prod-k3s-runbook.md](prod-k3s-runbook.md).
 
 ### Health/metrics — identical everywhere
 
@@ -313,7 +236,6 @@ All on port 8080 (`web/health.py`).
 - The tools-mode Discord smoke test and two-guild isolation check need a
   real second server invite and a live bot connection — exercise these
   once on staging (minikube) before promoting a change to prod.
-- `deploy/k8s/postgres.yaml` (Postgres, shared by dev + staging) exists;
-  the bot's own manifests (base Deployment + staging/prod overlays) don't —
-  needed before the `kubectl apply -k` commands in §2's deploy flow will
-  run.
+- The bot's base Deployment + prod overlay now exist (`deploy/k8s/base`,
+  `deploy/k8s/overlays/prod`); a dedicated staging overlay does not — staging
+  applies the base manifest directly for now.

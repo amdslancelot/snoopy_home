@@ -71,4 +71,4 @@ APScheduler `AsyncIOScheduler`, MemoryJobStore, job IDs `reminder_{id}`; fire ca
 - Discord bot needs two **Privileged Gateway Intents**: Server Members + Message Content.
 - Context caching requires a **paid** Gemini API tier (free tier returns `limit: 0`).
 - Admin = Discord Manage Server/Administrator, computed live — never stored.
-- Deploy: `deploy/DEPLOY.md` (current Podman/Quadlet) and `deploy/PLAN-DEPLOY-K3S.md` (staging+prod k3s plan). The upgrade history/plan is `docs/UPGRADE-PLAN.md`.
+- Deploy: prod on single-node k3s (fresh OCI node) — cutover runbook `docs/prod-k3s-runbook.md`, design rationale `deploy/PLAN-DEPLOY-K3S.md`, manifests `deploy/k8s/`; staging on minikube (`docs/prod-provisioning.md`). The upgrade history/plan is `docs/UPGRADE-PLAN.md`.

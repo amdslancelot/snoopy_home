@@ -1,11 +1,11 @@
 # Prod cutover runbook — snoopy on k3s (fresh OCI A1.Flex node)
 
-The current live prod is the single-VM **Podman/Quadlet + SQLite** bot
-(`deploy/DEPLOY.md`). This runbook stands up prod on **single-node k3s** on a
-**fresh** OCI Ampere A1.Flex instance (2 OCPU / 12 GB / 200 GB, Oracle Linux 9),
-with the bot on PostgreSQL and a shared Postgres in the `data` namespace ready
-for transigen/gelp later. It supersedes the Podman/Quadlet prod path in
-`deploy/DEPLOY.md` and `docs/prod-provisioning.md §1`.
+The prior live prod was a single-VM **Podman/Quadlet + SQLite** bot. This runbook
+stands up prod on **single-node k3s** on a **fresh** OCI Ampere A1.Flex instance
+(2 OCPU / 12 GB / 200 GB, Oracle Linux 9), with the bot on PostgreSQL and a
+shared Postgres in the `data` namespace ready for transigen/gelp later. It
+replaces the earlier Podman/Quadlet prod path, which has been removed from the
+docs (`git log` retains it).
 
 Design and manifests: `deploy/PLAN-DEPLOY-K3S.md`, `deploy/k8s/`.
 
@@ -212,8 +212,7 @@ systemctl --user daemon-reload
 # OL8: systemctl --user disable --now snoopy-home
 ```
 
-Then terminate the old instance in the OCI Console. Mark `deploy/DEPLOY.md`
-historical (done in its header).
+Then terminate the old instance in the OCI Console.
 
 ---
 
