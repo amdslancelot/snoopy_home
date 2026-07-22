@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Prod overlay: the real bot, namespace `snoopy`, on the OCI k3s node.
+# Deliberately pins NO image tag — the sha-tagged image is applied imperatively
+# with `kubectl set image` as the LAST deploy step. Corollary: never run
+# `apply -k` by hand without following it with `set image` to the deployed sha,
+# or the running pod reverts to the `:latest` placeholder (which, with
+# imagePullPolicy: Never, then fails to start). See deploy/PLAN-DEPLOY-K3S.md.
+namespace: snoopy
+
+resources:
+  - namespace.yaml
+  - ../../base

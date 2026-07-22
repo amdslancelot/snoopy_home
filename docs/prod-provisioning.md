@@ -33,6 +33,14 @@ for any shared database.
 
 ## 1. Provisioning Postgres on prod (OCI VM)
 
+> **⚠️ Superseded.** This section described provisioning Postgres as a
+> Podman/Quadlet container alongside the bot on the existing VM. Prod has since
+> moved to **single-node k3s on a fresh OCI A1.Flex node**, with Postgres as the
+> shared `data`-namespace Deployment (`deploy/k8s/postgres.yaml`) instead of a
+> Quadlet. Follow **[prod-k3s-runbook.md](prod-k3s-runbook.md)** for the current
+> cutover. The Podman/Quadlet notes below are retained only for the old box until
+> it is decommissioned. §2 (staging on minikube) and §3 (dev) remain current.
+
 The only genuinely new infrastructure requirement from the upgrade is
 **Postgres** on the VM that's already running the bot. Single-VM +
 Podman/Quadlet stays the right choice here — it's the existing live setup,

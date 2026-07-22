@@ -1,0 +1,48 @@
+# Base Deployment for the snoopy bot. Cluster/namespace-agnostic — overlays set
+# the namespace and (imperatively, at deploy time) the image tag. See
+# deploy/PLAN-DEPLOY-K3S.md and docs/prod-provisioning.md.
+#
+# Load-bearing choices (NOT defaults to tune later):
+#   replicas: 1 + strategy: Recreate  → never two bots on one Discord token.
+#     A rolling update would briefly run two pods, doubling every reply and
+#     every scheduled reminder.
+#   imagePullPolicy: Never            → the image is built on the node and
+#     imported into containerd (`k3s ctr images import`); there is no registry
+#     to pull from.
+# The pod is stateless — all state lives in the shared Postgres (data ns), so
+# there is no PVC here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: snoopy
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: snoopy }
+  template:
+    metadata:
+      labels: { app: snoopy }
+    spec:
+      containers:
+        - name: snoopy
+          image: localhost/snoopy-home:latest   # tag overridden per-deploy via `kubectl set image`
+          imagePullPolicy: Never
+          envFrom:
+            - secretRef: { name: snoopy-secrets }   # DISCORD_TOKEN, GEMINI_API_KEY, DATABASE_URL, GOOGLE_SA_JSON_B64
+          env:
+            - { name: PYTHONUNBUFFERED, value: "1" }
+          ports:
+            - { name: http, containerPort: 8080 }
+          livenessProbe:              # process + event loop alive
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:             # Discord connected + DB reachable + scheduler running
+            httpGet: { path: /ready, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 200m, memory: 256Mi }

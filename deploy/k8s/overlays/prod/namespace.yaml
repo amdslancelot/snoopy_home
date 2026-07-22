@@ -1,0 +1,7 @@
+# `kubectl apply -k` does not create the target namespace on its own, so it is
+# declared here as a resource. (The `namespace:` field in kustomization.yaml
+# only stamps the namespace onto other objects; kustomize skips Namespace kinds.)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: snoopy

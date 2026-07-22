@@ -1,6 +1,16 @@
 # Deploy plan — staging & prod on k3s (OCI A1.Flex)
 
-**Status: PLAN, superseded for staging.** The live deployment today is the single-environment Podman/Quadlet setup described in [DEPLOY.md](DEPLOY.md). This document was the plan for moving to two environments — **staging** and **prod** — co-located on one k3s node. That premise has changed: **staging now runs on minikube on the local Mac laptop**, decoupled from prod entirely — see [prod-provisioning.md](../docs/prod-provisioning.md) for the current plan. k3s remains a possible future path for **prod only**; the sections below (namespaces, staging overlay, CI `deploy-staging` job) describe the original co-located design and should be read as historical context, not the current plan, until this doc is revised.
+**Status: ACTIVE for prod (design); staging premise superseded.** Prod is being
+cut over to **single-node k3s on a fresh OCI A1.Flex node** — the runnable,
+step-by-step procedure is [prod-k3s-runbook.md](../docs/prod-k3s-runbook.md), and
+the manifests it applies live in [`deploy/k8s/`](k8s/). This document remains the
+**design rationale** (topology, resource budget, `Recreate`/`replicas: 1`,
+build-on-node-no-registry, `apply -k` before `set image`). Two premises here are
+outdated and should be read accordingly: **staging now runs on minikube on the
+local Mac laptop** (not co-located on the k3s node — see
+[prod-provisioning.md](../docs/prod-provisioning.md)), so the staging overlay and
+`deploy-staging` CI job below are historical; the k3s node runs **prod only** for
+now, with the shared `data` Postgres ready to host transigen/gelp later.
 
 Original artifact this plan was based on:
 <https://claude.ai/code/artifact/55c5f771-9585-4198-b5e8-2d9175ae8c6b>
