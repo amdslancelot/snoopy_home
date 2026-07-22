@@ -11,15 +11,10 @@ class Settings(BaseSettings):
     gemini_api_key: str
     discord_guild_id: Optional[int] = None
 
-    @field_validator("discord_guild_id", mode="before")
-    @classmethod
-    def empty_str_to_none(cls, v):
-        return None if v == "" else v
-
     bot_name: str = "Snoopy"
-    # Local dev: podman run -d --name snoopy-pg -e POSTGRES_PASSWORD=dev \
-    #   -e POSTGRES_DB=chores -p 5432:5432 postgres:17
-    database_url: str = "postgresql://postgres:dev@localhost:5432/chores"
+    # No default — every environment (dev/staging/prod) sets this explicitly via
+    # .env/secret. See .env.example for the local dev connection string.
+    database_url: str
     # Legacy SQLite file — read only by scripts/migrate_sqlite_to_pg.py
     db_path: str = "snoopy_home.db"
     timezone: str = "UTC"
@@ -40,6 +35,11 @@ class Settings(BaseSettings):
 
     # Discord voice TTS (optional) — fallback channel when target user is not in voice
     default_voice_channel_id: Optional[int] = None
+
+    @field_validator("discord_guild_id", "default_voice_channel_id", mode="before")
+    @classmethod
+    def empty_str_to_none(cls, v):
+        return None if v == "" else v
 
     # Bot personality ("default" = neutral assistant, "snoopy" = Snoopy the beagle)
     bot_personality: str = "default"

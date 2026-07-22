@@ -21,17 +21,20 @@ if not _dot_env_has("DISCORD_TOKEN"):
     os.environ.setdefault("DISCORD_TOKEN", "test-discord-token")
 if not _dot_env_has("GEMINI_API_KEY"):
     os.environ.setdefault("GEMINI_API_KEY", "test-gemini-api-key")
+# Unused by pure-unit tests (config.settings.database_url has no code default);
+# the pg_db fixture below overrides it with the real TEST_DATABASE_URL.
+if not _dot_env_has("DATABASE_URL"):
+    os.environ.setdefault("DATABASE_URL", "postgresql://unused:unused@localhost:5432/unused")
 
 
 import asyncpg
 import pytest
 
-# CI provides a postgres:17 service container; locally:
-#   podman run -d --name snoopy-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=chores -p 5432:5432 postgres:17
+# CI provides a postgres:17 service container; locally, point this at your
+# minikube-hosted dev Postgres (docs/prod-provisioning.md), e.g.:
 #   psql postgresql://postgres:dev@localhost:5432/postgres -c "CREATE DATABASE snoopy_test"
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL", "postgresql://postgres:dev@localhost:5432/snoopy_test"
-)
+#   export TEST_DATABASE_URL=postgresql://postgres:dev@localhost:5432/snoopy_test
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
 
 
 @pytest.fixture
@@ -41,6 +44,9 @@ async def pg_db(monkeypatch):
     Skips (rather than fails) when no test Postgres is reachable, so the
     pure-unit part of the suite still runs on machines without one.
     """
+    if not TEST_DATABASE_URL:
+        pytest.skip("TEST_DATABASE_URL not set — see tests/conftest.py for local setup")
+
     import config
 
     monkeypatch.setattr(config.settings, "database_url", TEST_DATABASE_URL)
