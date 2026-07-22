@@ -38,6 +38,7 @@ from config import settings
 from core.observability import get_logger, metrics
 from core.tools.registry import ToolContext, ToolRegistry
 from core.tools.registry import registry as tool_registry
+from integrations.google_calendar import google_calendar
 
 log = get_logger("gemini")
 
@@ -906,6 +907,7 @@ class GeminiClient:
                     log.exception("tool_failed", tool=call.name)
                     result = {"ok": False, "error": str(exc)}
                     status = "error"
+                log.debug("tool_call_detail", tool=call.name, args=args, result=result, status=status)
                 metrics.action_executions_total.labels(action=call.name, status=status).inc()
                 executed.append({"type": call.name, **args})
                 response_parts.append(
@@ -926,16 +928,25 @@ class GeminiClient:
 
     @staticmethod
     def _stamp_date(messages: list[dict]) -> list[dict]:
-        """Prepend current datetime (UTC + household local time) to the most recent user message."""
+        """Prepend current datetime (UTC + household local time) to the most recent user message.
+
+        Prefers the timezone the Google Calendar integration auto-detected
+        from the household's actual calendar (`google_calendar.timezone`)
+        over the static `settings.timezone` env var, so "today"/"tomorrow"
+        stay anchored to the household's real clock even if TIMEZONE is left
+        at its UTC default. Falls back to settings.timezone (then "UTC")
+        before the calendar integration has made its first API call.
+        """
         if not messages:
             return messages
         stamped = list(messages)
         utc_now = datetime.utcnow()
         ts = utc_now.strftime("%Y-%m-%d %H:%M:%S UTC")
-        if settings.timezone and settings.timezone != "UTC":
+        tz = google_calendar.timezone
+        if tz and tz != "UTC":
             try:
-                local_now = datetime.now(tz=ZoneInfo(settings.timezone))
-                ts += local_now.strftime(f" / %Y-%m-%d %H:%M:%S ({settings.timezone})")
+                local_now = datetime.now(tz=ZoneInfo(tz))
+                ts += local_now.strftime(f" / %Y-%m-%d %H:%M:%S ({tz})")
             except Exception:
                 pass
         for i in range(len(stamped) - 1, -1, -1):
