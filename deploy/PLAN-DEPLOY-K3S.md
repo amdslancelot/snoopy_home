@@ -8,7 +8,7 @@ the manifests it applies live in [`deploy/k8s/`](k8s/). This document remains th
 build-on-node-no-registry, `apply -k` before `set image`). Two premises here are
 outdated and should be read accordingly: **staging now runs on minikube on the
 local Mac laptop** (not co-located on the k3s node — see
-[prod-provisioning.md](../docs/prod-provisioning.md)), so the staging overlay and
+[dev-stage-minikube-runbook.md](../docs/dev-stage-minikube-runbook.md)), so the staging overlay and
 `deploy-staging` CI job below are historical; the k3s node runs **prod only** for
 now, with the shared `data` Postgres ready to host transigen/gelp later.
 

@@ -1,17 +1,10 @@
-# Prod provisioning + running the app in dev / stage / prod
+# Dev & staging runbook — minikube on the local Mac
 
-Reference notes written after the Postgres/eval/function-calling/multi-tenancy
-upgrade (`docs/UPGRADE-PLAN.md`). The code is DB-agnostic between
-orchestration paths — moving prod to a different orchestrator later is just
-a new `DATABASE_URL` and deploy pipeline, not a code change.
-
-**Environment split:** prod runs on **single-node k3s** on a fresh OCI
-A1.Flex node; staging runs on **minikube on the local Mac laptop**, entirely
-decoupled from prod's infrastructure. The two are separate clusters — minikube
-gives staging real Kubernetes namespacing for free, locally, without touching
-the prod box. `deploy/PLAN-DEPLOY-K3S.md`'s original plan co-located staging and
-prod on one k3s node; that assumption is superseded by this split (staging on
-minikube, prod on its own k3s node).
+How to run the bot in **dev** (local `python main.py`) and **staging** (a bot
+pod), both against the minikube cluster on the Mac. **Prod is a separate
+cluster** — single-node k3s on an OCI node — with its own procedure in
+[prod-k3s-runbook.md](prod-k3s-runbook.md); it is intentionally decoupled from
+everything here (prod never shares data with dev or staging).
 
 **Dev and staging share one Postgres instance, on purpose.** Both run
 locally on the same Mac, so as of 2026-07-19 there is a single `postgres:17`
@@ -23,30 +16,13 @@ Local `python main.py` reaches it over a `kubectl port-forward` tunnel to
 processes* can never share one data directory (Postgres locks it with
 `postmaster.pid`; forcing past the lock corrupts the data) — sharing data
 means exactly one server, reached from both sides. This is orthogonal to
-the prod-isolation rule below: prod still never shares data with dev or
-staging. The one condition this setup depends on: **run the dev bot
+the prod-isolation rule: prod still never shares data with dev or staging. The one condition this setup depends on: **run the dev bot
 process and the staging bot pod one at a time, never both live
 simultaneously** — two schedulers against the same rows will race on
 reminders and chore/todo state, the same hazard `PLAN-DEPLOY-K3S.md` calls out
 for any shared database.
 
-## 1. Prod — single-node k3s on the OCI node
-
-Prod runs on **single-node k3s** on a fresh OCI A1.Flex node: the bot in
-namespace `snoopy`, backed by the shared Postgres 17 in namespace `data`
-(`deploy/k8s/postgres.yaml`), rolled out by the `v*`-tag-gated CI job in
-`.github/workflows/deploy.yml`. The full provisioning + cutover procedure —
-install k3s, provision Postgres + the `snoopy_home`/`snoopy_rw` database, stop
-the old bot, migrate SQLite→Postgres, deploy, verify — is
-**[prod-k3s-runbook.md](prod-k3s-runbook.md)**; the design rationale is
-`deploy/PLAN-DEPLOY-K3S.md`.
-
-The earlier single-VM Podman/Quadlet path (bot + a `snoopy-pg` Quadlet Postgres,
-`~/.env.snoopy`, `systemctl --user restart`) has been removed now that k3s
-supersedes it; `git log` retains it if you need to operate the old box before it
-is decommissioned.
-
-## 2. Staging — minikube on the local Mac
+## 1. Staging — minikube on the local Mac
 
 Staging must have its **own Discord application/token** — never share
 prod's. Two bots on one token answer every message twice. Running staging
@@ -165,18 +141,18 @@ node). A dedicated staging overlay isn't in the repo yet; the `kubectl apply -k
 overlays/staging` command above is aspirational until one is added (staging can
 apply the base directly in the meantime).
 
-## 3. Running the app: dev / stage / prod, summarized
+## 2. Running the app: dev / stage, summarized
 
 ### Dev (local, macOS) — now depends on minikube, by design
 
-Dev's Postgres is the same minikube-hosted instance staging uses (§2) — not
+Dev's Postgres is the same minikube-hosted instance staging uses (§1) — not
 a standalone podman container anymore. Reach it via a port-forward tunnel:
 
 ```bash
 minikube start --driver=podman --container-runtime=containerd  # if not already running; resuming an existing cluster, safe
 # if the cluster doesn't exist yet (fresh or after `minikube delete`), use
 # ./deploy/setup-minikube.sh instead — plain `minikube start` won't set up
-# etcd encryption-at-rest on a from-scratch cluster (see §2)
+# etcd encryption-at-rest on a from-scratch cluster (see §1)
 kubectl apply -f deploy/k8s/postgres.yaml    # idempotent; no-op if already applied
 kubectl -n snoopy-staging port-forward svc/postgres 5432:5432 &   # keep running while you work
 
@@ -198,7 +174,7 @@ main.py` fails at the migration step with an `asyncpg`
 `OSError`/`Connect call failed` on `127.0.0.1:5432`, this tunnel isn't
 running; check with `lsof -nP -iTCP:5432 -sTCP:LISTEN` (empty output means
 re-run the `port-forward` command above) — see "Checking staging Postgres
-status" in §2 for the fuller diagnostic sequence.
+status" in §1 for the fuller diagnostic sequence.
 
 Remember the rule from the note above: don't run this alongside the
 staging bot pod at the same time — they'd both be scheduling reminders and
@@ -206,22 +182,14 @@ writing chore/todo state against the same rows.
 
 ### Staging (minikube, local Mac)
 
-See §2 above — `minikube start` → build/load image → `kubectl apply -k
+See §1 above — `minikube start` → build/load image → `kubectl apply -k
 overlays/staging` → verify in a test Discord server, all run manually from
 the laptop.
 
-### Prod (OCI k3s node)
+(Prod deploys are a separate cluster and procedure —
+[prod-k3s-runbook.md](prod-k3s-runbook.md).)
 
-```bash
-git tag v1.2.0 && git push origin v1.2.0
-# CI: tests → SSH to node → podman build → k3s ctr images import → apply -k → set image → rollout status
-```
-
-Observe: `kubectl -n snoopy logs deploy/snoopy -f` and
-`kubectl -n snoopy rollout status deploy/snoopy`. Full procedure:
-[prod-k3s-runbook.md](prod-k3s-runbook.md).
-
-### Health/metrics — identical everywhere
+### Health/metrics — dev & staging (same endpoints as prod)
 
 | Endpoint | Purpose |
 |---|---|

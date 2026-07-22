@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-time (or after `minikube delete`) setup for the local minikube instance
-# that dev + staging share (docs/prod-provisioning.md). Brings up the cluster
+# that dev + staging share (docs/dev-stage-minikube-runbook.md). Brings up the cluster
 # with etcd encryption-at-rest and the shared Postgres.
 #
 # Two things aren't the plain `minikube start` defaults, both required:

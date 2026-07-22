@@ -169,8 +169,9 @@ Create DB / Create role attributes) for `*_rw`.
 
 ## Impact on the existing repo (execution follow-ups — not done in this plan)
 
-- **`prod-provisioning.md` §1** (Podman/Quadlet `snoopy-pg`): ✅ removed — §1 now
-  points at the k3s `data` Postgres / `docs/prod-k3s-runbook.md`.
+- **`prod-provisioning.md` §1** (Podman/Quadlet `snoopy-pg`): ✅ removed — prod
+  provisioning moved to `docs/prod-k3s-runbook.md`, and the file was renamed
+  `docs/dev-stage-minikube-runbook.md` (dev/stage content only).
 - **`deploy/setup-vm.sh`** (Podman prod path, incl. `CREATE ROLE snoopy_rw`):
   ✅ removed — prod provisioning is now k3s manifests + the SQL above
   (`docs/prod-k3s-runbook.md`).
