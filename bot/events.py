@@ -109,6 +109,7 @@ async def _handle(message: discord.Message, text: str):
     log.info("model_selected", tier=complexity.tier.name, model=model, summary=complexity.summary)
 
     context_manager.add_user(channel_id, text, username)
+    log.debug("user_message", channel_id=channel_id, author=username, text=text)
 
     try:
         if settings.action_protocol == "tools":
@@ -149,6 +150,7 @@ async def _handle(message: discord.Message, text: str):
         reply_text = "Sorry, I didn't quite understand that. Could you rephrase?"
 
     context_manager.add_bot(channel_id, reply_text)
+    log.debug("bot_reply", channel_id=channel_id, text=reply_text, actions=actions)
     await message.channel.send(reply_text)
 
 
