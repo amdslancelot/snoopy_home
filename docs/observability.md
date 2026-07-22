@@ -78,7 +78,7 @@ scrape_configs:
 
 ## Kubernetes
 
-The k3s deployment (see `deploy/DEPLOY-K3S.md`) points `livenessProbe` at
+The k3s deployment (see `deploy/PLAN-DEPLOY-K3S.md`) points `livenessProbe` at
 `/health` and `readinessProbe` at `/ready` on containerPort 8080. Scraping
 can be enabled later with a `prometheus.io/scrape: "true"` pod annotation or
 a ServiceMonitor once a Prometheus stack exists on the cluster; the port is

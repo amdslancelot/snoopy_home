@@ -12,11 +12,12 @@ if [[ ! -f ~/.env.snoopy ]]; then
     echo "ERROR: create ~/.env.snoopy first (see deploy/env.snoopy.example), then re-run."
     exit 1
 fi
+chmod 600 ~/.env.snoopy
 
 echo "==> Detected Oracle Linux $OL_VER"
 
 # ── 0. System dependencies ────────────────────────────────────────────────────
-sudo dnf install -y git sqlite podman
+sudo dnf install -y git podman
 
 # ── 1. Clone or update repo ───────────────────────────────────────────────────
 if [[ -d "$APP_DIR/.git" ]]; then
@@ -25,8 +26,53 @@ else
     git clone "$REPO_URL" "$APP_DIR"
 fi
 
-# ── 2. Persistent volume for SQLite ──────────────────────────────────────────
-podman volume exists snoopy-data || podman volume create snoopy-data
+# ── 2. Postgres — shared network + Quadlet container ─────────────────────────
+# See docs/prod-provisioning.md #1. Skips cleanly if already provisioned by a
+# prior run of this script.
+podman network exists snoopy-net || podman network create snoopy-net
+
+if [[ ! -f ~/.env.postgres ]]; then
+    echo "ERROR: create ~/.env.postgres first (POSTGRES_PASSWORD=<superuser bootstrap password>, chmod 600), then re-run."
+    exit 1
+fi
+
+mkdir -p ~/.config/containers/systemd
+if [[ ! -f ~/.config/containers/systemd/snoopy-pg.container ]]; then
+    cat > ~/.config/containers/systemd/snoopy-pg.container <<'EOF'
+[Unit]
+Description=Postgres 17 for Snoopy Home
+
+[Container]
+Image=docker.io/library/postgres:17
+ContainerName=snoopy-pg
+Network=snoopy-net
+Volume=snoopy-pgdata:/var/lib/postgresql/data
+EnvironmentFile=%h/.env.postgres
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user start snoopy-pg
+    echo "==> Waiting for Postgres to accept connections..."
+    until podman exec snoopy-pg pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
+fi
+
+# App database + role, owned by the app role (sidesteps the PG15+ grant gotcha).
+# `grep -c` guards against re-running this on a VM that already has the role.
+if ! podman exec snoopy-pg psql -U postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='snoopy_rw'" | grep -q 1; then
+    if [[ ! -f ~/.env.snoopy ]] || ! grep -q '^DATABASE_URL=' ~/.env.snoopy; then
+        echo "ERROR: set DATABASE_URL in ~/.env.snoopy first (see deploy/env.snoopy.example) so the app password here matches, then re-run."
+        exit 1
+    fi
+    APP_PW=$(grep '^DATABASE_URL=' ~/.env.snoopy | sed -E 's#.*://snoopy_rw:([^@]+)@.*#\1#')
+    podman exec -it snoopy-pg psql -U postgres -c \
+        "CREATE ROLE snoopy_rw LOGIN PASSWORD '${APP_PW}';" -c \
+        "CREATE DATABASE snoopy_home OWNER snoopy_rw;"
+fi
 
 # ── 3. Build image from local code ───────────────────────────────────────────
 cd "$APP_DIR"
@@ -37,7 +83,7 @@ if [[ "$OL_VER" == "8" ]]; then
     # OL8: podman generate systemd (Podman < 4.4)
     podman run -d \
         --name snoopy-home \
-        -v snoopy-data:/data \
+        --network snoopy-net \
         --env-file ~/.env.snoopy \
         snoopy-home:latest
 
@@ -57,7 +103,7 @@ Description=snoopy-home Discord bot
 
 [Container]
 Image=localhost/snoopy-home:latest
-Volume=snoopy-data:/data
+Network=snoopy-net
 EnvironmentFile=%h/.env.snoopy
 Environment=PYTHONUNBUFFERED=1
 PodmanArgs=--log-driver=journald
