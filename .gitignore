@@ -21,3 +21,6 @@ env/
 
 # Local notes
 worklog.md
+
+# upward token-usage stats — local tracking, not source
+.upward/
