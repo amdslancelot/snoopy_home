@@ -110,14 +110,14 @@ The pod is stateless (all state lives in the shared Postgres), so there is no PV
 
 ## Secrets
 
-Secrets stay out of git exactly as today, but move from `~/.env.snoopy` into a Kubernetes Secret per namespace, created once on the node from an env file (same format as `deploy/env.snoopy.example`):
+Secrets move into a Kubernetes Secret per namespace, created once on the node from an env file (plain `KEY=VALUE` lines — see `docs/prod-k3s-runbook.md` Gate 3):
 
 ```bash
 kubectl -n snoopy-staging create secret generic snoopy-secrets --from-env-file=env.staging
 kubectl -n snoopy         create secret generic snoopy-secrets --from-env-file=env.prod
 ```
 
-`env.staging` carries the staging Discord token, staging Gemini key, and `DATABASE_URL=postgresql://snoopy_rw_staging:<pw>@postgres.data.svc:5432/snoopy_home_staging`; `env.prod` carries the real token/key and `DATABASE_URL=postgresql://snoopy_rw:<pw>@postgres.data.svc:5432/snoopy_home`. `GOOGLE_SA_JSON_B64` works unchanged — `entrypoint.sh` decodes it at container start in either environment. Delete the env files from disk after creating the secrets, or keep them only in `~/` with `chmod 600` as `~/.env.snoopy` is kept today.
+`env.staging` carries the staging Discord token, staging Gemini key, and `DATABASE_URL=postgresql://snoopy_rw_staging:<pw>@postgres.data.svc:5432/snoopy_home_staging`; `env.prod` carries the real token/key and `DATABASE_URL=postgresql://snoopy_rw:<pw>@postgres.data.svc:5432/snoopy_home`. `GOOGLE_SA_JSON_B64` works unchanged — `entrypoint.sh` decodes it at container start in either environment. `shred` the env files from disk after creating the secrets.
 
 ## CI/CD
 

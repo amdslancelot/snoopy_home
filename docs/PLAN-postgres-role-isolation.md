@@ -14,8 +14,9 @@ as the `postgres` superuser (see "Snoopy staging migration" below).
 - **Shared Postgres placement**: a neutral **`data`** namespace, reached in-cluster
   at `postgres.data.svc:5432` — not inside any one app's namespace.
 - **Prod topology**: **k3s on the OCI VM** hosts all app services *and* the shared
-  Postgres. This **supersedes** the Podman/Quadlet prod-Postgres path in
-  `prod-provisioning.md` §1 and `deploy/setup-vm.sh`.
+  Postgres. This **supersedes** the Podman/Quadlet prod-Postgres path formerly in
+  `prod-provisioning.md` §1 and `deploy/setup-vm.sh` (both since removed — see
+  `docs/prod-k3s-runbook.md`).
 - **Staging topology**: minikube on the Mac, same shape (Postgres in `data`).
 - **Two separate clusters** (prod-isolation rule: prod never shares data with
   staging) ⇒ identical DB/role **names in each cluster**, no `_staging` suffix;
@@ -168,10 +169,11 @@ Create DB / Create role attributes) for `*_rw`.
 
 ## Impact on the existing repo (execution follow-ups — not done in this plan)
 
-- **`prod-provisioning.md` §1** (Podman/Quadlet `snoopy-pg`): superseded for prod
-  by the k3s `data` Postgres. Retain only as history, or delete.
-- **`deploy/setup-vm.sh`**: its Podman prod path (incl. `CREATE ROLE snoopy_rw`)
-  is superseded; prod provisioning becomes k3s manifests + the SQL above.
+- **`prod-provisioning.md` §1** (Podman/Quadlet `snoopy-pg`): ✅ removed — §1 now
+  points at the k3s `data` Postgres / `docs/prod-k3s-runbook.md`.
+- **`deploy/setup-vm.sh`** (Podman prod path, incl. `CREATE ROLE snoopy_rw`):
+  ✅ removed — prod provisioning is now k3s manifests + the SQL above
+  (`docs/prod-k3s-runbook.md`).
 - **`snoopy_chores` → `snoopy_rw`** — ✅ DONE (2026-07-22) across
   `deploy/env.snoopy.example`, `deploy/setup-vm.sh`, `docs/prod-provisioning.md`,
   `docs/storage.md`, `deploy/PLAN-DEPLOY-K3S.md`, `docs/UPGRADE-PLAN.md`

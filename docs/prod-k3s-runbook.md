@@ -17,9 +17,6 @@ be **stopped** (Gate 4) before the new pod is allowed to start (Gate 6), and the
 data migration (Gate 5) must complete **before** the pod starts so the bot never
 races the migrator on the same rows.
 
-Because this is a *fresh* instance, the old bot keeps running on the old box
-until Gate 4 — there is no rush to touch it until then.
-
 ---
 
 ## Gate 0 — provision the instance

@@ -83,6 +83,25 @@ kubectl -n snoopy-staging create secret generic snoopy-secrets \
   --from-env-file=env.staging   # staging Discord token, staging Gemini key, DATABASE_URL
 ```
 
+### Deploy flow — manual (decision made explicitly: no self-hosted CI runner)
+
+GitHub Actions can't SSH into a laptop behind NAT/dynamic IP the way it
+reaches the OCI VM's public IP, so staging deploys are **manual, run from
+the laptop**, not automated in CI:
+
+```bash
+git pull
+minikube image build -t localhost/snoopy-home:staging .   # or: eval $(minikube docker-env) && podman build ...
+kubectl apply -k deploy/k8s/overlays/staging               # to author
+kubectl -n snoopy-staging set image deploy/snoopy snoopy=localhost/snoopy-home:staging
+kubectl -n snoopy-staging rollout status deploy/snoopy
+```
+
+This was a deliberate tradeoff: a self-hosted GitHub Actions runner on the
+laptop would restore "push to main auto-deploys to staging," but means
+giving a persistent GitHub-controlled agent execution access to a personal
+machine. Manual deploy avoids that at the cost of remembering to run it.
+
 ### Checking staging Postgres status
 
 ```bash
@@ -124,25 +143,6 @@ cat ~/.minikube/profiles/minikube/config.json | grep -i driver    # same info, s
 This project's minikube runs the `podman` driver with the `containerd`
 runtime — that's why `podman ps` only shows the node container and not the
 Pods inside it (see above).
-
-### Deploy flow — manual (decision made explicitly: no self-hosted CI runner)
-
-GitHub Actions can't SSH into a laptop behind NAT/dynamic IP the way it
-reaches the OCI VM's public IP, so staging deploys are **manual, run from
-the laptop**, not automated in CI:
-
-```bash
-git pull
-minikube image build -t localhost/snoopy-home:staging .   # or: eval $(minikube docker-env) && podman build ...
-kubectl apply -k deploy/k8s/overlays/staging               # to author
-kubectl -n snoopy-staging set image deploy/snoopy snoopy=localhost/snoopy-home:staging
-kubectl -n snoopy-staging rollout status deploy/snoopy
-```
-
-This was a deliberate tradeoff: a self-hosted GitHub Actions runner on the
-laptop would restore "push to main auto-deploys to staging," but means
-giving a persistent GitHub-controlled agent execution access to a personal
-machine. Manual deploy avoids that at the cost of remembering to run it.
 
 ### Availability caveat
 
