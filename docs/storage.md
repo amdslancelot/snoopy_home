@@ -21,16 +21,20 @@ scripts/
 
 ```bash
 podman run -d --name snoopy-pg \
-  -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=chores \
+  -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=snoopy_home \
   -p 5432:5432 postgres:17
 
 # tests use a second database:
 psql postgresql://postgres:dev@localhost:5432/postgres -c "CREATE DATABASE snoopy_test"
 ```
 
-`DATABASE_URL` defaults to `postgresql://postgres:dev@localhost:5432/chores`
-(see `config.py`); production supplies its own via the environment
-(`chores_rw` role on the cluster's shared Postgres).
+`DATABASE_URL` has no code default (`config.py`) — every environment sets it
+via `.env`/secret. Dev conventionally uses
+`postgresql://snoopy_rw:dev@localhost:5432/snoopy_home` (see `.env.example`) —
+the app connects as the least-privilege `snoopy_rw` role, not the `postgres`
+superuser; production supplies its own via the environment (same `snoopy_rw`
+role, distinct password, on the shared Postgres in the `data` namespace —
+`docs/PLAN-postgres-role-isolation.md`).
 
 ## Migrations
 
@@ -70,7 +74,7 @@ container; locally the fixture skips cleanly when no server is reachable.
 python -m storage.migrate                    # schema first
 python scripts/migrate_sqlite_to_pg.py \
   --sqlite snoopy_home.db \
-  --pg postgresql://chores_rw:<pw>@host:5432/chores
+  --pg postgresql://snoopy_rw:<pw>@host:5432/snoopy_home
 ```
 
 Rows keep their original ids (`ON CONFLICT DO NOTHING` — rerun-safe),

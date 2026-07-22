@@ -5,7 +5,7 @@ Usage (after `python -m storage.migrate` has created the schema):
 
     python scripts/migrate_sqlite_to_pg.py \
         --sqlite /path/to/snoopy_home.db \
-        --pg postgresql://postgres:dev@localhost:5432/chores
+        --pg postgresql://postgres:dev@localhost:5432/snoopy_home
 
 Idempotent-ish: rows are inserted with their original ids and ON CONFLICT DO
 NOTHING, so re-running cannot duplicate. Prints per-table source/dest counts
@@ -46,7 +46,7 @@ async def migrate(sqlite_path: str, pg_url: str) -> None:
                 """INSERT INTO household_members
                    (discord_id, username, display_name, timezone, profile, is_active)
                    VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-                   ON CONFLICT (discord_id) DO NOTHING""",
+                   ON CONFLICT (guild_id, discord_id) DO NOTHING""",
                 r["discord_id"], r["username"], r["display_name"],
                 r["timezone"] or "UTC",
                 json.dumps(json.loads(r["profile"] or "{}")),

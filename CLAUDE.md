@@ -5,12 +5,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Running the bot
 
 ```bash
-# Postgres first (data lives here, not in SQLite anymore):
-podman run -d --name snoopy-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=chores -p 5432:5432 postgres:17
+# Postgres first (data lives here, not in SQLite anymore). Dev and staging
+# share one Postgres instance, hosted in minikube with etcd encryption-at-rest
+# — see docs/prod-provisioning.md:
+./deploy/setup-minikube.sh   # fresh cluster / after `minikube delete`; idempotent otherwise
+kubectl -n data port-forward svc/postgres 5432:5432 &   # keep running (shared Postgres lives in the `data` namespace)
 python main.py           # runs migrations, starts health server + bot
 ```
 
-Requires a `.env` — copy `.env.example`; minimum `DISCORD_TOKEN`, `GEMINI_API_KEY` (and `DATABASE_URL` when not using the local default). Python 3.11+.
+Don't run this alongside the staging bot pod at the same time — both would
+schedule reminders and write chore/todo state against the same rows.
+
+Requires a `.env` — copy `.env.example`; minimum `DISCORD_TOKEN`, `GEMINI_API_KEY`, `DATABASE_URL` (no code default — see `.env.example`). Python 3.11+.
 
 Tests: `pytest tests/` (unit + Postgres integration; integration skips without a reachable `TEST_DATABASE_URL` database — create `snoopy_test` on the local Postgres; `live`-marked tests hit the real Gemini API and only run with a real key). Evals: `python -m evals.runner [--judge]`.
 
@@ -65,4 +71,4 @@ APScheduler `AsyncIOScheduler`, MemoryJobStore, job IDs `reminder_{id}`; fire ca
 - Discord bot needs two **Privileged Gateway Intents**: Server Members + Message Content.
 - Context caching requires a **paid** Gemini API tier (free tier returns `limit: 0`).
 - Admin = Discord Manage Server/Administrator, computed live — never stored.
-- Deploy: `deploy/DEPLOY.md` (current Podman/Quadlet) and `deploy/DEPLOY-K3S.md` (staging+prod k3s plan). The upgrade history/plan is `docs/UPGRADE-PLAN.md`.
+- Deploy: `deploy/DEPLOY.md` (current Podman/Quadlet) and `deploy/PLAN-DEPLOY-K3S.md` (staging+prod k3s plan). The upgrade history/plan is `docs/UPGRADE-PLAN.md`.

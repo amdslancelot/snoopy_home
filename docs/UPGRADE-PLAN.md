@@ -4,7 +4,7 @@ Status tracking: `[ ]` pending · `[x]` done. Updated as phases land.
 
 ## Context
 
-Snoopy Home (Discord AI home-assistant bot, Python 3.11 / discord.py / google-genai / SQLite) works, but as a portfolio piece it lacks what distinguishes senior candidates: an **eval harness** (the flagship differentiator), **native tool use** (today's `<action>{JSON}</action>` protocol is regex-extracted and write-only), **PostgreSQL** (replacing SQLite — also what the k3s cluster design prescribes: shared Postgres 17, database `chores`, role `chores_rw`, pool 5–10), **multi-tenancy** (single global household, no permissions), and **observability** (bare `print()`, no metrics, no HTTP surface).
+Snoopy Home (Discord AI home-assistant bot, Python 3.11 / discord.py / google-genai / SQLite) works, but as a portfolio piece it lacks what distinguishes senior candidates: an **eval harness** (the flagship differentiator), **native tool use** (today's `<action>{JSON}</action>` protocol is regex-extracted and write-only), **PostgreSQL** (replacing SQLite — also what the k3s cluster design prescribes: shared Postgres 17, database `snoopy_home`, role `snoopy_rw`, pool 5–10), **multi-tenancy** (single global household, no permissions), and **observability** (bare `print()`, no metrics, no HTTP surface).
 
 Decisions locked: hybrid eval scoring (deterministic + LLM-judge); Gemini native function calling only, **no MCP server**; multi-household guild isolation + admin/member roles; Prometheus + structlog + `/health`; SQLite → PostgreSQL via **plain asyncpg** (no ORM), numbered `.sql` migrations with a mini runner; local dev Postgres via plain `podman run` (no compose).
 
@@ -41,13 +41,13 @@ Phase order rationale: monitoring first (zero risk, instruments everything after
 ## [x] Phase 3 — PostgreSQL replaces SQLite (~700 LOC)
 > Landed. Data-move rehearsed on the real snoopy_home.db: counts match, rerun is a no-op.
 
-**Stack:** plain `asyncpg` + raw SQL (placeholders `?` → `$1`), no ORM. Migrations: numbered `.sql` files in `storage/migrations/` applied by a ~30-line runner tracking state in `schema_migrations`. Pool per the k3s budget: `asyncpg.create_pool(min_size=1, max_size=5)`, database `chores`, role `chores_rw`.
+**Stack:** plain `asyncpg` + raw SQL (placeholders `?` → `$1`), no ORM. Migrations: numbered `.sql` files in `storage/migrations/` applied by a ~30-line runner tracking state in `schema_migrations`. Pool per the k3s budget: `asyncpg.create_pool(min_size=1, max_size=5)`, database `snoopy_home`, role `snoopy_rw`.
 
 **New:** `storage/pool.py`, `storage/repositories.py` (absorbs ReminderManager and ALL inline SQL from `bot/events.py`; dataclasses in `storage/models.py` stay as row types), `storage/migrations/001_initial.sql`, `storage/migrate.py` (`python -m storage.migrate`), `scripts/migrate_sqlite_to_pg.py` (one-time data move, prints per-table row counts), `docs/storage.md`.
 
-**Modified:** `config.py` (`DATABASE_URL` replaces `db_path`; `db_path` kept only as migration-script input), `main.py` (pool init/close), `bot/events.py` (inline SQL → repositories), `tasks/reminder.py` (folded into repositories), `requirements.txt` (+`asyncpg`, −`aiosqlite`), `entrypoint.sh` (run migrations before `main.py`), `tests/conftest.py` (`tmp_db` → `pg_db` fixture), `.github/workflows/deploy.yml` (postgres:17 service container in test job), `deploy/DEPLOY-K3S.md` (talk to `postgres.data.svc:5432/chores` from day one — drop SQLite-on-PVC interim + PVC + DB-file-copy cutover; secrets gain `DATABASE_URL`; staging gets `chores_staging` DB + `chores_staging_rw` role).
+**Modified:** `config.py` (`DATABASE_URL` replaces `db_path`; `db_path` kept only as migration-script input), `main.py` (pool init/close), `bot/events.py` (inline SQL → repositories), `tasks/reminder.py` (folded into repositories), `requirements.txt` (+`asyncpg`, −`aiosqlite`), `entrypoint.sh` (run migrations before `main.py`), `tests/conftest.py` (`tmp_db` → `pg_db` fixture), `.github/workflows/deploy.yml` (postgres:17 service container in test job), `deploy/DEPLOY-K3S.md` (talk to `postgres.data.svc:5432/snoopy_home` from day one — drop SQLite-on-PVC interim + PVC + DB-file-copy cutover; secrets gain `DATABASE_URL`; staging gets `snoopy_home_staging` DB + `snoopy_rw_staging` role).
 
-**Design:** local dev Postgres: `podman run -d --name snoopy-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=chores -p 5432:5432 postgres:17`. `timestamptz` replaces ISO-text timestamps. Single replica (Recreate) → no advisory locking needed.
+**Design:** local dev Postgres: `podman run -d --name snoopy-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=snoopy_home -p 5432:5432 postgres:17`. `timestamptz` replaces ISO-text timestamps. Single replica (Recreate) → no advisory locking needed.
 
 **Done when:** bot end-to-end on local podman Postgres; CI green against service container; data-move rehearsed on a prod-DB copy with matching row counts; `aiosqlite` gone.
 
