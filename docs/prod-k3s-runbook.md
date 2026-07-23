@@ -90,13 +90,26 @@ kubectl -n data exec -it deploy/postgres -- psql -U postgres \
 
 ## Gate 3 — the app secret
 
+> ⚠️ **Google Calendar credential: use `GOOGLE_SA_JSON_B64`, NOT a file path.**
+> The credential goes in as the **base64 of the service-account JSON**.
+> `entrypoint.sh` decodes it to `/app/service_account.json` at startup and sets
+> `GOOGLE_SERVICE_ACCOUNT_JSON` for you. Do **not** set
+> `GOOGLE_SERVICE_ACCOUNT_JSON` yourself (e.g. copied from a dev `.env`): a path
+> like `api-project-….json` points at a file that isn't in the pod
+> (`.dockerignore` excludes `*.json`, so it's never baked into the image), and
+> Calendar fails at runtime with `No such file or directory`. Omit both if you're
+> not using Calendar.
+
 ```bash
+# generate the base64 first (skip this + the GOOGLE_SA_JSON_B64 line if no Calendar)
+SA_B64=$(base64 -w0 /path/to/service_account.json)
+
 cat > env.prod <<'EOF'
 DISCORD_TOKEN=<prod bot token>
 GEMINI_API_KEY=<prod Gemini key>
 DATABASE_URL=postgresql://snoopy_rw:<STRONG_APP_PW>@postgres.data.svc:5432/snoopy_home
-GOOGLE_SA_JSON_B64=<base64 of the service-account JSON, or omit>
 EOF
+echo "GOOGLE_SA_JSON_B64=${SA_B64}" >> env.prod   # appended separately so the b64 expands
 
 kubectl create namespace snoopy
 kubectl -n snoopy create secret generic snoopy-secrets --from-env-file=env.prod
