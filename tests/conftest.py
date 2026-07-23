@@ -31,7 +31,7 @@ import asyncpg
 import pytest
 
 # CI provides a postgres:17 service container; locally, point this at your
-# minikube-hosted dev Postgres (docs/prod-provisioning.md), e.g.:
+# minikube-hosted dev Postgres (docs/dev-stage-minikube-runbook.md), e.g.:
 #   psql postgresql://postgres:dev@localhost:5432/postgres -c "CREATE DATABASE snoopy_test"
 #   export TEST_DATABASE_URL=postgresql://postgres:dev@localhost:5432/snoopy_test
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")

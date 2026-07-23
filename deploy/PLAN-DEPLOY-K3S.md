@@ -1,6 +1,16 @@
 # Deploy plan — staging & prod on k3s (OCI A1.Flex)
 
-**Status: PLAN, superseded for staging.** The live deployment today is the single-environment Podman/Quadlet setup described in [DEPLOY.md](DEPLOY.md). This document was the plan for moving to two environments — **staging** and **prod** — co-located on one k3s node. That premise has changed: **staging now runs on minikube on the local Mac laptop**, decoupled from prod entirely — see [prod-provisioning.md](../docs/prod-provisioning.md) for the current plan. k3s remains a possible future path for **prod only**; the sections below (namespaces, staging overlay, CI `deploy-staging` job) describe the original co-located design and should be read as historical context, not the current plan, until this doc is revised.
+**Status: ACTIVE for prod (design); staging premise superseded.** Prod is being
+cut over to **single-node k3s on a fresh OCI A1.Flex node** — the runnable,
+step-by-step procedure is [prod-k3s-runbook.md](../docs/prod-k3s-runbook.md), and
+the manifests it applies live in [`deploy/k8s/`](k8s/). This document remains the
+**design rationale** (topology, resource budget, `Recreate`/`replicas: 1`,
+build-on-node-no-registry, `apply -k` before `set image`). Two premises here are
+outdated and should be read accordingly: **staging now runs on minikube on the
+local Mac laptop** (not co-located on the k3s node — see
+[dev-stage-minikube-runbook.md](../docs/dev-stage-minikube-runbook.md)), so the staging overlay and
+`deploy-staging` CI job below are historical; the k3s node runs **prod only** for
+now, with the shared `data` Postgres ready to host transigen/gelp later.
 
 Original artifact this plan was based on:
 <https://claude.ai/code/artifact/55c5f771-9585-4198-b5e8-2d9175ae8c6b>
@@ -100,14 +110,14 @@ The pod is stateless (all state lives in the shared Postgres), so there is no PV
 
 ## Secrets
 
-Secrets stay out of git exactly as today, but move from `~/.env.snoopy` into a Kubernetes Secret per namespace, created once on the node from an env file (same format as `deploy/env.snoopy.example`):
+Secrets move into a Kubernetes Secret per namespace, created once on the node from an env file (plain `KEY=VALUE` lines — see `docs/prod-k3s-runbook.md` Gate 3):
 
 ```bash
 kubectl -n snoopy-staging create secret generic snoopy-secrets --from-env-file=env.staging
 kubectl -n snoopy         create secret generic snoopy-secrets --from-env-file=env.prod
 ```
 
-`env.staging` carries the staging Discord token, staging Gemini key, and `DATABASE_URL=postgresql://snoopy_rw_staging:<pw>@postgres.data.svc:5432/snoopy_home_staging`; `env.prod` carries the real token/key and `DATABASE_URL=postgresql://snoopy_rw:<pw>@postgres.data.svc:5432/snoopy_home`. `GOOGLE_SA_JSON_B64` works unchanged — `entrypoint.sh` decodes it at container start in either environment. Delete the env files from disk after creating the secrets, or keep them only in `~/` with `chmod 600` as `~/.env.snoopy` is kept today.
+`env.staging` carries the staging Discord token, staging Gemini key, and `DATABASE_URL=postgresql://snoopy_rw_staging:<pw>@postgres.data.svc:5432/snoopy_home_staging`; `env.prod` carries the real token/key and `DATABASE_URL=postgresql://snoopy_rw:<pw>@postgres.data.svc:5432/snoopy_home`. `GOOGLE_SA_JSON_B64` works unchanged — `entrypoint.sh` decodes it at container start in either environment. `shred` the env files from disk after creating the secrets.
 
 ## CI/CD
 
@@ -144,7 +154,7 @@ Design decisions:
 - [ ] **Phase 1 — manifests.** Add `deploy/k8s/` base + overlays to the repo. Create both namespaces (`kubectl create namespace snoopy-staging`, `kubectl create namespace snoopy` — `apply -k` does not create them) and both `snoopy-secrets`. Nothing deployed yet; `kubectl apply -k` dry-run passes.
 - [ ] **Phase 2 — staging live.** Replace the `deploy` job in `.github/workflows/deploy.yml` with `deploy-staging`; add the `promote` workflow and the `production` GitHub Environment. Push to `main`, verify the staging bot responds in the test server and a reminder fires.
 - [ ] **Phase 3 — prod cutover.** The sequence: (1) stop the Quadlet service on the old VM (`systemctl --user stop snoopy-home`) — two bots on one token must never overlap, so the old bot goes down before the new one comes up; (2) apply the schema to the prod database: `python -m storage.migrate` with `DATABASE_URL` pointing at `snoopy_home` (or just let step 4's pod do it at startup); (3) move the data: copy `snoopy_home.db` off the old VM and run `python scripts/migrate_sqlite_to_pg.py --sqlite snoopy_home.db --pg postgresql://snoopy_rw:<pw>@<node>:.../snoopy_home` — it prints per-table source/dest row counts and exits non-zero on any mismatch; keep the SQLite file as the rollback artifact; (4) promote to prod (the promote workflow runs `apply -k` + `set image` with the staging-verified sha) and verify with the real bot. Then retire the Quadlet permanently: on OL9, remove `~/.config/containers/systemd/snoopy-home.container` and run `systemctl --user daemon-reload` — Quadlet units are generated from the `.container` file and auto-enabled, so `systemctl --user disable` does not stick; on OL8, `systemctl --user disable --now snoopy-home`.
-- [ ] **Phase 4 — decommission.** Retire the old VM (or the old service, if the k3s node is the same VM re-imaged). Mark DEPLOY.md as historical.
+- [ ] **Phase 4 — decommission.** Retire the old VM. The old Podman/Quadlet `DEPLOY.md` has been removed (git history retains it).
 - [x] **Phase 5 — Postgres.** Done ahead of schedule, in the codebase rather than at cutover: `storage/` now runs on asyncpg with `asyncpg.create_pool(min_size=1, max_size=5)` per the artifact's connection budget (all apps together sit at ~45 of Postgres's default 100 connections; the escape hatch if that climbs is PgBouncer in transaction mode, not bigger pools). Versioned migrations live in `storage/migrations/`; the one-time data move is `scripts/migrate_sqlite_to_pg.py` (Phase 3 step 3). See `docs/storage.md`.
 
 ## Everyday operations (post-cutover)

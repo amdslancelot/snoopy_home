@@ -122,6 +122,6 @@ Trust but verify: created a Secret with a unique random marker string, then dire
 
 ## 現在已經寫進專案裡的東西
 
-`deploy/setup-minikube.sh` automates the whole recipe (background start, race to place the config, apply the shared Postgres) so future `minikube delete` + rebuilds don't silently lose encryption-at-rest by reverting to a plain `minikube start`. `CLAUDE.md` and `docs/prod-provisioning.md` were updated to point at this script instead of the bare `minikube start` command.
+`deploy/setup-minikube.sh` automates the whole recipe (background start, race to place the config, apply the shared Postgres) so future `minikube delete` + rebuilds don't silently lose encryption-at-rest by reverting to a plain `minikube start`. `CLAUDE.md` and `docs/dev-stage-minikube-runbook.md` were updated to point at this script instead of the bare `minikube start` command.
 
-`deploy/setup-minikube.sh` 把整套流程自動化了(背景啟動、搶時間放設定檔、部署共用的 Postgres)，這樣以後 `minikube delete` 重建時，就不會因為誤用單純的 `minikube start` 而悄悄失去加密功能。`CLAUDE.md` 跟 `docs/prod-provisioning.md` 也都更新成指向這支腳本，而不是裸的 `minikube start` 指令。
+`deploy/setup-minikube.sh` 把整套流程自動化了(背景啟動、搶時間放設定檔、部署共用的 Postgres)，這樣以後 `minikube delete` 重建時，就不會因為誤用單純的 `minikube start` 而悄悄失去加密功能。`CLAUDE.md` 跟 `docs/dev-stage-minikube-runbook.md` 也都更新成指向這支腳本，而不是裸的 `minikube start` 指令。

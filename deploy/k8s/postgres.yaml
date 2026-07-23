@@ -5,7 +5,7 @@ metadata:
 ---
 # postgres-secret is NOT defined here on purpose — a Secret's value would be a
 # plaintext password committed to git. Create it once, before applying this
-# file, sourced from a shell variable (docs/prod-provisioning.md #2):
+# file, sourced from a shell variable (docs/dev-stage-minikube-runbook.md §1):
 #   POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-dev}" && \
 #   kubectl create secret generic postgres-secret -n data \
 #     --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \

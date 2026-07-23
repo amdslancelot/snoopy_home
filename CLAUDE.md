@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # Postgres first (data lives here, not in SQLite anymore). Dev and staging
 # share one Postgres instance, hosted in minikube with etcd encryption-at-rest
-# — see docs/prod-provisioning.md:
+# — see docs/dev-stage-minikube-runbook.md:
 ./deploy/setup-minikube.sh   # fresh cluster / after `minikube delete`; idempotent otherwise
 kubectl -n data port-forward svc/postgres 5432:5432 &   # keep running (shared Postgres lives in the `data` namespace)
 python main.py           # runs migrations, starts health server + bot
@@ -71,4 +71,4 @@ APScheduler `AsyncIOScheduler`, MemoryJobStore, job IDs `reminder_{id}`; fire ca
 - Discord bot needs two **Privileged Gateway Intents**: Server Members + Message Content.
 - Context caching requires a **paid** Gemini API tier (free tier returns `limit: 0`).
 - Admin = Discord Manage Server/Administrator, computed live — never stored.
-- Deploy: `deploy/DEPLOY.md` (current Podman/Quadlet) and `deploy/PLAN-DEPLOY-K3S.md` (staging+prod k3s plan). The upgrade history/plan is `docs/UPGRADE-PLAN.md`.
+- Deploy: prod on single-node k3s (fresh OCI node) — cutover runbook `docs/prod-k3s-runbook.md`, design rationale `deploy/PLAN-DEPLOY-K3S.md`, manifests `deploy/k8s/`; staging on minikube (`docs/dev-stage-minikube-runbook.md`). The upgrade history/plan is `docs/UPGRADE-PLAN.md`.
