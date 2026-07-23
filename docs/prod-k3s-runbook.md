@@ -9,14 +9,6 @@ docs (`git log` retains it).
 
 Design and manifests: `deploy/PLAN-DEPLOY-K3S.md`, `deploy/k8s/`.
 
-## The one rule that outranks everything
-
-**Never run two bots on one Discord token.** Two instances answer every message
-twice and fire every reminder twice. The old Quadlet bot on the current VM must
-be **stopped** (Gate 4) before the new pod is allowed to start (Gate 6), and the
-data migration (Gate 5) must complete **before** the pod starts so the bot never
-races the migrator on the same rows.
-
 ---
 
 ## Gate 0 — provision the instance
