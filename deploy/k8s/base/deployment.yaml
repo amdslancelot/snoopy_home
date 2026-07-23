@@ -1,6 +1,6 @@
 # Base Deployment for the snoopy bot. Cluster/namespace-agnostic — overlays set
 # the namespace and (imperatively, at deploy time) the image tag. See
-# deploy/PLAN-DEPLOY-K3S.md and docs/prod-provisioning.md.
+# deploy/PLAN-DEPLOY-K3S.md and docs/prod-k3s-runbook.md.
 #
 # Load-bearing choices (NOT defaults to tune later):
 #   replicas: 1 + strategy: Recreate  → never two bots on one Discord token.

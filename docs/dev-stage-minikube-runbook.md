@@ -8,11 +8,11 @@ everything here (prod never shares data with dev or staging).
 
 **Dev and staging share one Postgres instance, on purpose.** Both run
 locally on the same Mac, so as of 2026-07-19 there is a single `postgres:17`
-Deployment inside minikube (`deploy/k8s/postgres.yaml`, namespace
-`snoopy-staging`) — no separate podman-hosted Postgres for dev anymore.
+Deployment inside minikube (`deploy/k8s/postgres.yaml`, in the neutral
+`data` namespace) — no separate podman-hosted Postgres for dev anymore.
 Local `python main.py` reaches it over a `kubectl port-forward` tunnel to
 `localhost:5432`; the staging bot pod reaches it in-cluster via the
-`postgres.snoopy-staging.svc` Service DNS. Two live Postgres *server
+`postgres.data.svc` Service DNS. Two live Postgres *server
 processes* can never share one data directory (Postgres locks it with
 `postmaster.pid`; forcing past the lock corrupts the data) — sharing data
 means exactly one server, reached from both sides. This is orthogonal to
@@ -82,9 +82,9 @@ machine. Manual deploy avoids that at the cost of remembering to run it.
 
 ```bash
 minikube status                                    # is the cluster itself up?
-kubectl -n snoopy-staging get pods                  # is the postgres Pod Running?
-kubectl -n snoopy-staging describe pod -l app=postgres   # recent events / restart reasons if it's not
-kubectl -n snoopy-staging exec -it deploy/postgres -- pg_isready   # is it accepting connections?
+kubectl -n data get pods                  # is the postgres Pod Running?
+kubectl -n data describe pod -l app=postgres   # recent events / restart reasons if it's not
+kubectl -n data exec -it deploy/postgres -- pg_isready   # is it accepting connections?
 ```
 
 `podman ps` won't show the Postgres container — minikube's podman driver
@@ -100,8 +100,8 @@ minikube ssh -- sudo crictl ps   # containerd's view from inside the node, if yo
 ### Getting a shell / psql prompt in staging Postgres
 
 ```bash
-kubectl -n snoopy-staging exec -it deploy/postgres -- bash            # shell in the container
-kubectl -n snoopy-staging exec -it deploy/postgres -- psql -U postgres   # straight to a psql prompt
+kubectl -n data exec -it deploy/postgres -- bash            # shell in the container
+kubectl -n data exec -it deploy/postgres -- psql -U postgres   # straight to a psql prompt
 ```
 
 `deploy/postgres` resolves to whichever Pod the Deployment currently owns,
@@ -149,12 +149,13 @@ Dev's Postgres is the same minikube-hosted instance staging uses (§1) — not
 a standalone podman container anymore. Reach it via a port-forward tunnel:
 
 ```bash
+podman machine start # boot up linux virtual machine required to run containers on macOS (default set of off on personal laptop)
 minikube start --driver=podman --container-runtime=containerd  # if not already running; resuming an existing cluster, safe
 # if the cluster doesn't exist yet (fresh or after `minikube delete`), use
 # ./deploy/setup-minikube.sh instead — plain `minikube start` won't set up
 # etcd encryption-at-rest on a from-scratch cluster (see §1)
 kubectl apply -f deploy/k8s/postgres.yaml    # idempotent; no-op if already applied
-kubectl -n snoopy-staging port-forward svc/postgres 5432:5432 &   # keep running while you work
+kubectl -n data port-forward svc/postgres 5432:5432 &   # keep running while you work
 
 # .env needs: DISCORD_TOKEN, GEMINI_API_KEY, DATABASE_URL (no code default —
 # see .env.example; postgresql://postgres:dev@localhost:5432/snoopy_home still
