@@ -121,7 +121,19 @@ rollback artifact; do not delete it.
 
 The Postgres Service isn't exposed outside the cluster, so tunnel to it on the
 node, then run the migrations inside the built image (which carries asyncpg
-etc.) with the repo mounted so the code matches:
+etc.) with the repo mounted so the code matches. Two OL9-specific notes baked
+into the commands below:
+
+- **`:z` on the bind mount** — OL9 runs SELinux enforcing, which blocks an
+  unlabeled bind mount; the container would see an empty `/app` and fail with
+  `No module named 'storage'`. `:z` relabels the dir so the container can read
+  it. (The SQLite file must come through this mount — `.dockerignore` excludes
+  `*.db`, so it is *not* in the image.)
+- **stub `DISCORD_TOKEN`/`GEMINI_API_KEY` on step 1** — `storage.migrate` imports
+  `config`, whose `Settings()` requires both fields at construction even though
+  the migration only uses `DATABASE_URL`. Throwaway values satisfy pydantic;
+  nothing connects to Discord/Gemini. Step 2's script doesn't import `config`,
+  so it needs no stubs.
 
 ```bash
 cd ~/snoopy_home
@@ -132,11 +144,12 @@ kubectl -n data port-forward svc/postgres 5432:5432 &   # note the PID; kill whe
 PG='postgresql://snoopy_rw:<STRONG_APP_PW>@localhost:5432/snoopy_home'
 
 # 1. create the schema (as the owner role, so the app owns its tables)
-podman run --rm --network=host -v ~/snoopy_home:/app -w /app \
-  -e DATABASE_URL="$PG" --entrypoint python localhost/snoopy-home:${SHA} -m storage.migrate
+podman run --rm --network=host -v ~/snoopy_home:/app:z -w /app \
+  -e DATABASE_URL="$PG" -e DISCORD_TOKEN=x -e GEMINI_API_KEY=x \
+  --entrypoint python localhost/snoopy-home:${SHA} -m storage.migrate
 
 # 2. copy the data — prints per-table source/dest row counts, exits non-zero on any mismatch
-podman run --rm --network=host -v ~/snoopy_home:/app -w /app \
+podman run --rm --network=host -v ~/snoopy_home:/app:z -w /app \
   --entrypoint python localhost/snoopy-home:${SHA} \
   scripts/migrate_sqlite_to_pg.py --sqlite snoopy_home.db --pg "$PG"
 
