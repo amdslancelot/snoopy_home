@@ -86,7 +86,9 @@ jobs:
             SHA=${GH_SHA:0:7}
             IMG=localhost/snoopy-home:${SHA}
             podman build -t "${IMG}" .
-            podman save "${IMG}" | sudo k3s ctr images import -
+            # full path: sudo's secure_path excludes /usr/local/bin, and it
+            # matches the NOPASSWD sudoers rule (/usr/local/bin/k3s) exactly
+            podman save "${IMG}" | sudo /usr/local/bin/k3s ctr images import -
             kubectl apply -k deploy/k8s/overlays/prod
             kubectl -n snoopy set image deploy/snoopy snoopy="${IMG}"
             kubectl -n snoopy rollout status deploy/snoopy --timeout=120s

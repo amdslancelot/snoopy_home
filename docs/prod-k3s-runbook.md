@@ -172,7 +172,9 @@ Recommended: validate once **manually on the node** before trusting the tag path
 ```bash
 cd ~/snoopy_home
 IMG=localhost/snoopy-home:${SHA}
-podman save "${IMG}" | sudo k3s ctr images import -
+# full path: sudo's secure_path excludes /usr/local/bin (so bare `sudo k3s`
+# fails "command not found"), and it matches the NOPASSWD sudoers rule exactly
+podman save "${IMG}" | sudo /usr/local/bin/k3s ctr images import -
 kubectl apply -k deploy/k8s/overlays/prod
 kubectl -n snoopy set image deploy/snoopy snoopy="${IMG}"
 kubectl -n snoopy rollout status deploy/snoopy --timeout=120s
