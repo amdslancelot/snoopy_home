@@ -1,24 +1,17 @@
 name: Evals
 
 on:
-  schedule:
-    - cron: "0 3 * * *"          # nightly, with judge
   workflow_dispatch:
     inputs:
       judge:
         description: "Run the LLM judge as well"
         type: boolean
         default: true
-  pull_request:
-    types: [opened, synchronize, labeled]
 
 jobs:
   eval:
-    # PRs only run when explicitly opted in via the 'eval' label —
-    # these are real Gemini calls with real cost.
-    if: >
-      github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'eval')
+    # Manual-only (workflow_dispatch) — these are real Gemini calls with real
+    # cost, so the suite runs only when triggered by hand from the Actions tab.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,13 +27,17 @@ jobs:
       - name: Run eval suite
         run: |
           JUDGE_FLAG=""
-          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.judge }}" = "true" ]; then
+          if [ "${{ inputs.judge }}" = "true" ]; then
             JUDGE_FLAG="--judge"
           fi
           python -m evals.runner --threshold 0.9 --output eval-report/report $JUDGE_FLAG
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           DISCORD_TOKEN: eval-placeholder-token
+          # config.Settings requires a non-empty DATABASE_URL at import time.
+          # The eval pipeline never connects to a DB (see evals/runner.py) — this
+          # placeholder only satisfies pydantic validation.
+          DATABASE_URL: postgresql://eval:eval@localhost/eval
 
       - name: Upload report
         if: always()
