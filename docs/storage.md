@@ -36,6 +36,14 @@ superuser; production supplies its own via the environment (same `snoopy_rw`
 role, distinct password, on the shared Postgres in the `data` namespace —
 `docs/PLAN-postgres-role-isolation.md`).
 
+Connections use **no TLS / `sslmode`** — this is deliberate, not an oversight.
+DB traffic never crosses an untrusted network: in prod the app and Postgres
+share the k3s cluster (in-cluster Service DNS), and dev reaches it over a
+`kubectl port-forward` tunnel to localhost. Don't flag missing
+`sslmode=require` as a gap. Revisit only if Postgres is ever reached over a
+public network (e.g. a managed cloud DB). The shared-Postgres infrastructure
+itself is owned by the `platform` repo.
+
 ## Migrations
 
 Numbered `.sql` files in `storage/migrations/` are applied in filename order
