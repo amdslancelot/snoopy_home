@@ -9,6 +9,17 @@ docs (`git log` retains it).
 
 Design and manifests: `deploy/PLAN-DEPLOY-K3S.md`, `deploy/k8s/`.
 
+> **Platform handover (2026-07).** On the *live shared node*, the shared
+> infrastructure this runbook stands up is now owned by the **`platform`** repo,
+> not snoopy_home: node bootstrap (Gate 1 — k3s + firewall; platform re-enabled
+> Traefik + servicelb, which this runbook had disabled for the snoopy-only era)
+> and the shared Postgres data plane (Gate 2). Platform is the applier of record
+> for the byte-identical Postgres manifest (its `cluster/data-postgres/`). This
+> file stays as the historical cutover record **and** still drives snoopy's local
+> **minikube** dev/staging, which keeps using `deploy/k8s/postgres.yaml` — only
+> the *prod* usage moved to platform, so the file itself is deliberately kept.
+> See the platform repo's `docs/runbook.md` for the current live-node ownership.
+
 ---
 
 ## Gate 0 — provision the instance
@@ -26,6 +37,11 @@ sudo dnf install -y git podman
 ```
 
 ## Gate 1 — install k3s
+
+> On the live shared node this is done by the platform repo's
+> `bootstrap/bootstrap-node.sh`, which keeps Traefik + servicelb **enabled** (the
+> fleet needs 80/443). The `--disable traefik --disable servicelb` below is the
+> original snoopy-only setup and applies to a fresh/minikube-style bring-up only.
 
 k3s on OL9: firewalld interferes with the CNI on a single node — the standard
 fix is to disable it and rely on the OCI Security List for the firewall (which
@@ -57,6 +73,11 @@ kubectl get nodes   # Ready within ~30s
 ```
 
 ## Gate 2 — shared Postgres in the `data` namespace
+
+> On the live shared node the **platform** repo now applies this same manifest
+> (`cluster/data-postgres/postgres.yaml`, byte-identical) and owns the `data`
+> namespace. The steps below still apply verbatim to a fresh minikube dev/staging
+> bring-up, which is why `deploy/k8s/postgres.yaml` is kept in this repo.
 
 ```bash
 cd ~/snoopy_home
