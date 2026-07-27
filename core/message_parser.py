@@ -17,7 +17,7 @@ dimensions (0–12 total) and maps the score to a model tier:
 
   Score  Tier    Model
   ─────────────────────────────────────────────
-  0 – 3  LOW     gemini-2.0-flash   (fast, cheap)
+  0 – 3  LOW     gemini-2.5-flash-lite (fast, cheap)
   4 – 7  MEDIUM  gemini-2.5-flash   (balanced)
   8 – 12 HIGH    gemini-2.5-pro     (deep reasoning)
 """

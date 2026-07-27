@@ -3,12 +3,15 @@ Gemini API client with context caching.
 
 Caching strategy
 ────────────────
-What is cached (static prefix, rarely changes):
+What is cached (static prefix only, shared across every guild):
   • Bot persona, capability descriptions, and formatting rules
-  • Household member roster
-  • Active chore schedule
+  • Tool/action schemas (native function-calling declarations, or the
+    legacy <action>{JSON}</action> instructions when action_protocol="legacy")
 
 What is NOT cached (dynamic, per-request):
+  • Household member roster and chore schedule — injected per request as a
+    leading context message (see core/household.py), since they differ per
+    guild and change often
   • Current date/time  — prepended to the last user message instead
   • Conversation history — passed as `contents` on every call
 

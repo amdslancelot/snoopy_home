@@ -9,6 +9,7 @@ A Discord AI home assistant for a household group chat. Add it to a shared serve
 ### 1. Prerequisites
 
 - Python 3.11+
+- A reachable **PostgreSQL 17** instance and a `DATABASE_URL` — required, no code default (`config.py`). See [`docs/storage.md`](docs/storage.md) for schema/migration details and [`docs/dev-stage-minikube-runbook.md`](docs/dev-stage-minikube-runbook.md) for how to actually stand one up locally (a minikube-hosted Postgres reached via `kubectl port-forward`).
 - `ffmpeg` installed and on your `PATH` (required for voice TTS playback)
 - A [Discord bot token](https://discord.com/developers/applications) with **Server Members Intent** and **Message Content Intent** enabled
 - A [Google Gemini API key](https://aistudio.google.com/) (paid tier required for prompt caching)
@@ -23,13 +24,13 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Fill in DISCORD_TOKEN and GEMINI_API_KEY at minimum
+# Fill in DISCORD_TOKEN, GEMINI_API_KEY, and DATABASE_URL at minimum
 ```
 
 ### 4. Run
 
 ```bash
-python main.py
+python main.py   # applies pending storage/migrations/*.sql, then starts the bot
 ```
 
 ---
@@ -222,48 +223,73 @@ LLMRouter.select_model(score)            ← maps score → model name
   │  8–12 → gemini-2.5-pro         (HIGH)
   │
   ▼
-GeminiClient.generate(messages, model)   ← the ONE LLM call per message
-  │  ├─ _ensure_cache(model)   create/reuse server-side prompt cache (once/hour)
-  │  ├─ _stamp_date(messages)  prepend current UTC time to last user message
-  │  └─ models.generate_content(...)
-  │
+format_household(members, chores)        ← per-guild roster + chores, built fresh
+  │                                          from Postgres every request (core/household.py) —
+  │                                          NOT part of the cached prompt
   ▼
-_extract_actions(response)
-  │  Strip <action>{JSON}</action> blocks from reply text
-  │  Return (display_text, list_of_actions)
-  │
-  ▼
-_execute_action(action, message)         ← for each action in the list
-  │  create_reminder       → save to SQLite + schedule with APScheduler
-  │  create_chore          → save to SQLite
-  │  complete_chore        → update last_completed in SQLite
-  │  cancel_reminder       → mark inactive + unschedule
-  │  update_profile        → merge new facts into member's JSON profile
-  │  create_calendar_event → create event via Google Calendar API
-  │  speak_in_voice        → join voice channel + play TTS audio
+GeminiClient.generate_with_tools(messages, model, ctx, household)
+  │  Native function-calling loop (default; ACTION_PROTOCOL=tools):
+  │  ├─ _ensure_cache(model)     create/reuse server-side cache of the STATIC
+  │  │                           prefix only — persona + rules + tool schemas
+  │  │                           (once/hour); household rides in uncached
+  │  ├─ _stamp_date(messages)    prepend current UTC + household-local time
+  │  ├─ models.generate_content(...) → model replies with text, or with one
+  │  │   or more function calls
+  │  └─ if function calls: execute each via ToolRegistry, feed the results
+  │      back as function_response parts, and repeat (capped at 5 rounds)
+  │      until the model returns plain text with no further calls
   │
   ▼
 channel.send(display_text)
 ```
 
-### LLM calls per message: 1
+Tool executors (`create_reminder`, `create_chore`, `complete_chore`,
+`cancel_reminder`, `update_profile`, `create_calendar_event`,
+`speak_in_voice`, plus 6 read-only tools such as `list_reminders` and
+`chore_stats`) live in `bot/events.py` (writes) and `core/tools/read_tools.py`
+(reads), and persist through `storage/repositories.py` against Postgres.
 
-The complexity router is entirely rule-based, so there is no "routing LLM call." Only one `generate_content` call is made per user message.
+A legacy `<action>{"type": ...}</action>` regex protocol (`GeminiClient.generate`
++ `_extract_actions`) still exists behind `ACTION_PROTOCOL=legacy` as a
+rollback switch — see [`docs/function-calling.md`](docs/function-calling.md) —
+but native function calling is the default and the actively developed path.
+
+### LLM calls per message
+
+The complexity router is entirely rule-based, so there is no "routing LLM
+call." Under the default tools protocol, `generate_with_tools` makes exactly
+one `generate_content` call when the model answers directly, or one call per
+round-trip when it invokes tools (call → execute → feed result back → next
+call), up to `max_iterations` (5) before giving up. The legacy protocol
+always makes exactly one call per message.
 
 ### Prompt caching
 
-The static system prompt (persona, capabilities, action schemas, home management knowledge base) plus the household roster and chore schedule are cached server-side on Gemini. This cached content is reused for every message, keeping costs low.
+Only the **static prefix** — persona, capability rules, and the tool/action
+schemas — is cached server-side on Gemini. It never varies per guild, so one
+cache is shared across every household.
 
-- One cache per model tier (LOW / MEDIUM / HIGH)
+The **household roster and chore schedule are NOT cached**: they're rebuilt
+from Postgres and injected as a small leading context message on every
+request (`core/household.py`), since they differ per guild and change often
+— caching them per-guild would multiply the 4096-token cache floor by the
+number of guilds.
+
+- One cache per model tier (LOW / MEDIUM / HIGH), shared across all guilds
 - Cache TTL: 1 hour (configurable via `CACHE_TTL_SECONDS`)
-- Cache is invalidated when household members or chores change
-- Current date/time is **not** cached — it is prepended to each message at request time so the cache never goes stale
+- Current date/time is also **not** cached — it is prepended to each message at request time
+- If cache creation fails (e.g. below the token floor), generation falls back to uncached mode transparently
 
-Minimum 4096 tokens required for caching (Gemini paid tier constraint). The system prompt is sized to exceed this comfortably.
+Minimum 4096 tokens required for caching (Gemini paid tier constraint). The static prefix is sized to exceed this comfortably.
 
 ### Member profiles
 
-Profiles are stored as a JSON blob per member in SQLite. Snoopy accumulates them passively — whenever a member mentions a personal fact in conversation, Gemini emits an `update_profile` action that merges the new data into the existing profile. The full profile is included in the household context injected into every prompt.
+Profiles are stored as a `JSONB` column per member in Postgres
+(`household_members.profile`). Snoopy accumulates them passively — whenever a
+member mentions a personal fact in conversation, the model calls
+`update_profile`, which merges the new data into the existing profile
+server-side (`profile || $1::jsonb`, no read-modify-write race). The full
+profile is included in the household context injected into every request.
 
 ```json
 {
@@ -279,7 +305,7 @@ The `google_email` key is used by the calendar integration to send event invites
 
 ### Reminder scheduling
 
-APScheduler `AsyncIOScheduler` (timezone: UTC) with MemoryJobStore. All active reminders are rescheduled from SQLite on startup. One-time reminders use `DateTrigger` with an explicit UTC datetime; recurring reminders use `CronTrigger` with UTC timezone.
+APScheduler `AsyncIOScheduler` (timezone: UTC) with MemoryJobStore. All active reminders are rescheduled from Postgres on startup. One-time reminders use `DateTrigger` with an explicit UTC datetime; recurring reminders use `CronTrigger` with UTC timezone.
 
 Reminders with `voice: true` play TTS audio in the target user's voice channel (or the `DEFAULT_VOICE_CHANNEL_ID` fallback) in addition to the normal text ping.
 
@@ -297,31 +323,50 @@ Reminders with `voice: true` play TTS audio in the target user's voice channel (
 
 ```
 snoopy_home/
-├── main.py                  Entry point — init DB, start bot
-├── config.py                Settings via pydantic-settings + .env
+├── main.py                  Entry point — run migrations, init pool, start bot
+├── config.py                Settings via pydantic-settings + .env (DATABASE_URL required)
 ├── bot/
 │   ├── client.py            HomeBot subclass (intents, tree)
-│   └── events.py            on_message, slash commands, action handlers
+│   └── events.py            on_message, slash commands, write-tool/action handlers
 ├── core/
-│   ├── gemini_client.py     Gemini API client, prompt caching, action extraction
+│   ├── gemini_client.py     Gemini API client: prompt caching, native tool-calling loop,
+│   │                        legacy action extraction
 │   ├── llm_router.py        Complexity score → model name
 │   ├── message_parser.py    ComplexityAnalyzer (rule-based, 6 dimensions)
-│   └── context_manager.py   Per-channel sliding window of conversation history
+│   ├── context_manager.py   Per-channel sliding window of conversation history
+│   ├── household.py         Per-guild roster + chore block, injected uncached per request
+│   ├── observability.py     Structured logging (structlog) + Prometheus metrics
+│   └── tools/
+│       ├── declarations.py  FunctionDeclarations for all 15 tools (9 writes + 6 reads)
+│       ├── registry.py      ToolSpec/ToolRegistry/ToolContext for native function calling
+│       └── read_tools.py    Read-only tool executors (repositories + calendar)
 ├── integrations/
 │   ├── google_calendar.py   Service-account Google Calendar client
 │   └── voice_tts.py         edge-tts synthesis + Discord voice channel playback
 ├── tasks/
 │   ├── scheduler.py         APScheduler wrapper, UTC DateTrigger/CronTrigger
-│   └── reminder.py          ReminderManager — CRUD + dateparser NL time parsing
-└── storage/
-    ├── database.py          SQLite schema init + migrations
-    └── models.py            Reminder, ChoreTask, HouseholdMember dataclasses
+│   └── reminder.py          Back-compat re-exports of storage/repositories.py's ReminderRepository
+├── storage/
+│   ├── migrate.py           Versioned migration runner (storage/migrations/*.sql)
+│   ├── migrations/          Numbered .sql files, tracked in schema_migrations
+│   ├── pool.py              asyncpg connection pool + JSONB↔dict codecs
+│   ├── repositories.py      All SQL: Reminder/Chore/Todo/Member repositories
+│   └── models.py            Reminder, ChoreTask, HouseholdMember dataclasses (row types)
+├── scripts/
+│   └── migrate_sqlite_to_pg.py   One-time legacy SQLite → Postgres data move
+└── web/
+    └── health.py             /health endpoint (bot ready + DB ping + scheduler running)
 ```
+
+See [`docs/storage.md`](docs/storage.md) for the storage layer in depth and
+[`docs/function-calling.md`](docs/function-calling.md) for the tool-calling
+loop and action-protocol rollback switch.
 
 ### Key constraints
 
 - `bot/events.py` imports from `core/`, `tasks/`, `storage/`, `integrations/` — never the reverse
 - `tasks/scheduler.py` has no import from `bot/` — the fire callback is injected at startup
 - `bot.events` is imported inside `main()` so decorators register after the event loop starts
-- All datetimes stored and scheduled in UTC (naive, interpreted explicitly as UTC)
+- Datetimes are `TIMESTAMPTZ` in Postgres; naive UTC in Python everywhere above `storage/` — the repository layer converts at the boundary
 - Google Calendar and voice TTS are opt-in — the bot starts and runs normally without their env vars set
+- `DATABASE_URL` has no code default — every environment (dev/staging/prod) must set it explicitly
