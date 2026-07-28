@@ -9,15 +9,16 @@ What is cached (static prefix only, shared across every guild):
     legacy <action>{JSON}</action> instructions when action_protocol="legacy")
 
 What is NOT cached (dynamic, per-request):
-  • Household member roster and chore schedule — injected per request as a
-    leading context message (see core/household.py), since they differ per
-    guild and change often
-  • Current date/time  — prepended to the last user message instead
+  • Current date/time  — stamped onto the last user message (_stamp_date)
   • Conversation history — passed as `contents` on every call
+  • Per-household data (member roster + chore schedule) — injected as a
+    leading context message per request (see core/household.py), NOT cached.
+    One cache per guild would multiply the 4096-token floor by the guild
+    count, so the cache stays purely static and household-agnostic.
 
 Cache lifecycle:
   • One cache handle per model (LOW/MEDIUM/HIGH may target different models).
-  • Cache is recreated when it expires or when household data changes.
+  • Cache is recreated when it expires (TTL: CACHE_TTL_SECONDS).
   • If cache creation fails (e.g. content below minimum token threshold),
     generation falls back to uncached mode transparently.
 
