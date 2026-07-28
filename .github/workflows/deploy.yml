@@ -53,10 +53,20 @@ jobs:
   # the overlay pins no tag, so applying it alone would revert the pod to the
   # `:latest` placeholder. The sha is applied imperatively as the last step.
   #
-  # Node prerequisites (one-time, see docs/prod-provisioning.md):
-  #   - repo cloned at ~/snoopy_home; git, podman installed
+  # The build runs under sudo so the image lands in root's podman store
+  # (/var/lib/containers) alongside the other apps on this shared node, rather
+  # than in the SSH user's rootless store. That is where the platform repo's
+  # daily prune looks, and it matters here more than elsewhere: the prune keeps
+  # the newest N images per repository and collects the rest, but the tag-reuse
+  # cleanup that covers `:latest` pipelines never fires for sha tags — nothing
+  # is ever orphaned, so without that retention these builds accumulate one
+  # ~789MB image per deploy forever. Only the build identity changed; the
+  # trigger (tag + this SSH action) and the ephemeral token are untouched.
+  #
+  # Node prerequisites (one-time, see docs/prod-k3s-runbook.md):
+  #   - repo cloned at /opt/snoopy_home, owned by the SSH user; git, podman
   #   - `kubectl` usable by the SSH user (k3s kubeconfig at ~/.kube/config)
-  #   - passwordless sudo for `k3s ctr images import`
+  #   - passwordless sudo for podman and `k3s ctr images import`
   #   - namespace `snoopy` + secret `snoopy-secrets` + shared Postgres (data ns) exist
   deploy:
     needs: test
@@ -78,18 +88,21 @@ jobs:
           envs: GH_TOKEN,GH_REPO,GH_SHA,GH_REF
           script: |
             set -euo pipefail
-            cd ~/snoopy_home
+            cd /opt/snoopy_home
             # Check out the exact tagged commit (build once, deploy that sha).
+            # git stays unprivileged: the checkout is owned by the SSH user even
+            # though it lives under /opt, because ownership follows whoever runs
+            # the deploy, not the path.
             git fetch --force https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git \
               "refs/tags/${GH_REF}:refs/tags/${GH_REF}"
             git checkout --force "refs/tags/${GH_REF}"
             SHA=${GH_SHA:0:7}
             IMG=localhost/snoopy-home:${SHA}
-            podman build -t "${IMG}" .
+            sudo podman build -t "${IMG}" .
             # full path: sudo's secure_path excludes /usr/local/bin, and it
             # matches the NOPASSWD sudoers rule (/usr/local/bin/k3s) exactly
-            podman save "${IMG}" | sudo /usr/local/bin/k3s ctr images import -
+            sudo podman save "${IMG}" | sudo /usr/local/bin/k3s ctr images import -
             kubectl apply -k deploy/k8s/overlays/prod
             kubectl -n snoopy set image deploy/snoopy snoopy="${IMG}"
             kubectl -n snoopy rollout status deploy/snoopy --timeout=120s
-            podman image prune -f
+            sudo podman image prune -f

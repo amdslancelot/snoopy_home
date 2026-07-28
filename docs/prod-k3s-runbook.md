@@ -62,11 +62,16 @@ curl -sfL https://get.k3s.io | \
 # suspenders for standalone kubectl later:
 mkdir -p ~/.kube && sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config && sudo chown opc:opc ~/.kube/config
 
-# CI runs `sudo k3s ctr images import` non-interactively — allow it without a password:
+# CI runs `sudo k3s ctr images import` and `sudo podman build` non-interactively
+# — allow them without a password:
 echo 'opc ALL=(ALL) NOPASSWD: /usr/local/bin/k3s' | sudo tee /etc/sudoers.d/k3s-ctr
 
-# Clone the repo where CI expects it:
-git clone https://github.com/<YOUR_USERNAME>/<YOUR_REPO>.git ~/snoopy_home
+# Clone the repo where CI expects it. /opt/<app> is the shared node's convention
+# for app checkouts; the directory is owned by the deploy user rather than root
+# because ownership follows whoever runs the deploy, not the path — git stays
+# unprivileged and only podman needs sudo.
+sudo git clone https://github.com/<YOUR_USERNAME>/<YOUR_REPO>.git /opt/snoopy_home
+sudo chown -R opc:opc /opt/snoopy_home
 # (private repo: embed a read-scope PAT — https://<user>:<PAT>@github.com/...)
 
 kubectl get nodes   # Ready within ~30s
@@ -80,7 +85,7 @@ kubectl get nodes   # Ready within ~30s
 > bring-up, which is why `deploy/k8s/postgres.yaml` is kept in this repo.
 
 ```bash
-cd ~/snoopy_home
+cd /opt/snoopy_home
 
 # Superuser bootstrap password — provisioning only; the app never uses it.
 kubectl create namespace data
@@ -145,7 +150,7 @@ On the **OLD** VM (not the new node):
 ssh opc@<OLD_VM_IP> 'systemctl --user stop snoopy-home'
 # copy the live DB straight to the new node's repo dir for the migration:
 scp opc@<OLD_VM_IP>:/home/opc/.local/share/containers/storage/volumes/snoopy-data/_data/snoopy_home.db \
-    opc@<NEW_VM_IP>:~/snoopy_home/snoopy_home.db
+    opc@<NEW_VM_IP>:/opt/snoopy_home/snoopy_home.db
 ```
 
 From here the bot is **down** — keep Gates 5–6 tight. Keep this `.db` as the
@@ -170,7 +175,7 @@ into the commands below:
   so it needs no stubs.
 
 ```bash
-cd ~/snoopy_home
+cd /opt/snoopy_home
 SHA=$(git rev-parse --short HEAD)
 podman build -t localhost/snoopy-home:${SHA} .
 
@@ -178,12 +183,12 @@ kubectl -n data port-forward svc/postgres 5432:5432 &   # note the PID; kill whe
 PG='postgresql://snoopy_rw:<STRONG_APP_PW>@localhost:5432/snoopy_home'
 
 # 1. create the schema (as the owner role, so the app owns its tables)
-podman run --rm --network=host -v ~/snoopy_home:/app:z -w /app \
+podman run --rm --network=host -v /opt/snoopy_home:/app:z -w /app \
   -e DATABASE_URL="$PG" -e DISCORD_TOKEN=x -e GEMINI_API_KEY=x \
   --entrypoint python localhost/snoopy-home:${SHA} -m storage.migrate
 
 # 2. copy the data — prints per-table source/dest row counts, exits non-zero on any mismatch
-podman run --rm --network=host -v ~/snoopy_home:/app:z -w /app \
+podman run --rm --network=host -v /opt/snoopy_home:/app:z -w /app \
   --entrypoint python localhost/snoopy-home:${SHA} \
   scripts/migrate_sqlite_to_pg.py --sqlite snoopy_home.db --pg "$PG"
 
@@ -204,7 +209,7 @@ Recommended: validate once **manually on the node** before trusting the tag path
 — same commands CI runs, using the image you already built in Gate 5:
 
 ```bash
-cd ~/snoopy_home
+cd /opt/snoopy_home
 IMG=localhost/snoopy-home:${SHA}
 # full path: sudo's secure_path excludes /usr/local/bin (so bare `sudo k3s`
 # fails "command not found"), and it matches the NOPASSWD sudoers rule exactly
