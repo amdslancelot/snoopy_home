@@ -4,6 +4,47 @@ A Discord AI home assistant for a household group chat. Add it to a shared serve
 
 ---
 
+## Features
+
+Everything is driven by natural language — mention Snoopy and talk normally, no command syntax to memorize. Under the hood the LLM acts through **15 Gemini native function-calling tools** (9 writes + 6 reads).
+
+### 🔔 Reminders
+- One-off or recurring (cron) reminders, targeted at `@me`, a specific `@member`, or `@everyone` (the whole household)
+- **Voice reminders** — when they fire, Snoopy joins a voice channel and speaks them aloud via TTS (`voice=true`)
+- View with `/reminders`; cancel by id or by describing it
+- Active reminders are rescheduled from Postgres on startup (APScheduler), so a restart never drops one
+
+### 🧹 Chores
+- Add recurring chores on a cron schedule, optionally assigned to a member
+- Mark chores done (case-insensitive fuzzy match); every completion is logged
+- **Fairness stats** — completion counts per member over a window, for "who did the most chores" and rotation questions
+- View schedule, assignee, and last-completed time via slash commands
+
+### 📅 Google Calendar
+- Create, reschedule/rename, and delete events on a shared household calendar (fuzzy title match)
+- Invite household members — their Google emails are resolved from their profiles
+- List upcoming events over a look-ahead window
+
+### ✅ To-dos
+- Add and remove one-off to-do items, optionally assigned to members; list open items and who owns them
+
+### 🗣️ Voice announcements
+- Have Snoopy join a voice channel and speak a message *right now* via TTS (free `edge-tts`, no API key)
+
+### 👤 Member profiles
+- Snoopy passively learns personal facts as members chat and merges them into per-member profiles (only the mentioned fields — never overwriting the rest)
+- Captures fields like age, sleep/wake times, work hours, diet, medications, health notes, hobbies, timezone, and Google email, and draws on them when answering
+
+### 🧠 Under the hood
+- **Complexity routing** — six rule-based dimensions score each message 0–12 and pick the Gemini tier (flash-lite / flash / pro) with no extra LLM call
+- **Prompt caching** — the static system prompt + tool schemas are cached server-side and shared across households; per-household data rides as a per-request context message
+- **Multi-tenancy** — every household (guild) is isolated; all queries carry `guild_id`
+- **Storage** — PostgreSQL via plain asyncpg (no ORM), with numbered migrations run at startup
+- **Observability** — structlog, Prometheus metrics, and `/health` + `/ready` endpoints, with a Grafana dashboard
+- **Deployment** — production on single-node k3s; staging on minikube; a golden-dataset eval suite gates prompt/tool changes
+
+---
+
 ## Setup
 
 ### 1. Prerequisites
