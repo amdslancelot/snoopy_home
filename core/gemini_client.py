@@ -42,6 +42,7 @@ from config import settings
 from core.observability import get_logger, metrics
 from core.tools.registry import ToolContext, ToolRegistry
 from core.tools.registry import registry as tool_registry
+from core.tools.read_tools import READ_TOOL_NAMES
 from integrations.google_calendar import google_calendar
 
 log = get_logger("gemini")
@@ -846,6 +847,7 @@ class GeminiClient:
             )
 
         executed: list[dict] = []
+        succeeded_writes = 0  # writes whose executor reported ok — the honesty test below
         loop = asyncio.get_running_loop()
         response = None
 
@@ -914,19 +916,42 @@ class GeminiClient:
                 log.debug("tool_call_detail", tool=call.name, args=args, result=result, status=status)
                 metrics.action_executions_total.labels(action=call.name, status=status).inc()
                 executed.append({"type": call.name, **args})
+                if call.name not in READ_TOOL_NAMES and result.get("ok", True):
+                    succeeded_writes += 1
                 response_parts.append(
                     types.Part.from_function_response(name=call.name, response=result)
                 )
             contents.append(types.Content(role="tool", parts=response_parts))
 
-        log.warning("tool_loop_exhausted", model=model, iterations=max_iterations)
+        log.warning(
+            "tool_loop_exhausted",
+            model=model,
+            iterations=max_iterations,
+            tool_calls=len(executed),
+            succeeded_writes=succeeded_writes,
+        )
         text = ""
         if response is not None:
             try:
                 text = (response.text or "").strip()
             except Exception:
                 text = ""
-        return text or "Done!", executed
+        if text:
+            return text, executed
+        # No text to fall back on: the model was still asking for tools when the
+        # cap hit, so it did not consider the job done. Only claim success if at
+        # least one write actually landed — otherwise a hardcoded "Done!" would
+        # be exactly the confirmation-without-an-action the prompt forbids.
+        if succeeded_writes:
+            return "Done!", executed
+        metrics.action_executions_total.labels(
+            action="tool_loop_exhausted", status="error"
+        ).inc()
+        return (
+            "I wasn't able to finish that one — nothing got saved. "
+            "Mind rephrasing it for me?",
+            executed,
+        )
 
     # ── Helpers ───────────────────────────────────────────────────────────
 

@@ -84,13 +84,20 @@ async def _chore_stats(args: dict, ctx: ToolContext) -> dict:
     }
 
 
+_READ_TOOLS = [
+    ("list_reminders", _list_reminders),
+    ("list_chores", _list_chores),
+    ("list_todos", _list_todos),
+    ("get_member_profile", _get_member_profile),
+    ("list_calendar_events", _list_calendar_events),
+    ("chore_stats", _chore_stats),
+]
+
+#: Names of the read-only tools. A loop that only ran these changed nothing,
+#: so the caller must not claim it did — see the tool-loop exhaustion path.
+READ_TOOL_NAMES = frozenset(name for name, _ in _READ_TOOLS)
+
+
 def register(registry: ToolRegistry) -> None:
-    for name, executor in [
-        ("list_reminders", _list_reminders),
-        ("list_chores", _list_chores),
-        ("list_todos", _list_todos),
-        ("get_member_profile", _get_member_profile),
-        ("list_calendar_events", _list_calendar_events),
-        ("chore_stats", _chore_stats),
-    ]:
+    for name, executor in _READ_TOOLS:
         registry.register(DECLARATIONS[name], executor)

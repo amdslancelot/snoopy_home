@@ -87,6 +87,7 @@ async def test_executor_exception_fed_back_as_error(client):
 
 
 async def test_iteration_cap_stops_runaway_loop(client):
+    """Cap hit after read-only calls: nothing was written, so don't claim it was."""
     client._client.models.generate_content.side_effect = [
         _fake_response(calls=[("list_chores", {})]) for _ in range(10)
     ]
@@ -95,7 +96,42 @@ async def test_iteration_cap_stops_runaway_loop(client):
     )
     assert client._client.models.generate_content.call_count == 5
     assert len(executed) == 5
-    assert text == "Done!"  # fallback when the model never produced text
+    assert "wasn't able to finish" in text
+    assert "Done" not in text
+
+
+async def test_iteration_cap_with_failing_writes_does_not_claim_success(client):
+    async def failing(args, ctx):
+        return {"ok": False, "error": "db down"}
+
+    client._client.models.generate_content.side_effect = [
+        _fake_response(calls=[("create_reminder", {})]) for _ in range(10)
+    ]
+    text, _ = await client.generate_with_tools(
+        _MSG,
+        "test-model",
+        _CTX,
+        use_cache=False,
+        registry=_registry(executor=failing, name="create_reminder"),
+        max_iterations=5,
+    )
+    assert "wasn't able to finish" in text
+
+
+async def test_iteration_cap_after_successful_write_still_confirms(client):
+    """A write landed — "Done!" is true even though the model kept going."""
+    client._client.models.generate_content.side_effect = [
+        _fake_response(calls=[("create_reminder", {})]) for _ in range(10)
+    ]
+    text, _ = await client.generate_with_tools(
+        _MSG,
+        "test-model",
+        _CTX,
+        use_cache=False,
+        registry=_registry(name="create_reminder"),
+        max_iterations=5,
+    )
+    assert text == "Done!"
 
 
 async def test_uncached_config_carries_tools_and_system_instruction(client):

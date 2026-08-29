@@ -65,6 +65,14 @@ declarations, not prose.
   responses — the model apologises instead of the pipeline crashing.
 - Every iteration is instrumented (latency, tokens, cost,
   `action_executions_total{action,status}`).
+- **Exhaustion is not success.** Hitting the cap means the model was still
+  asking for tools, i.e. it did not consider the job done, and its text part
+  is usually empty. With no text to return, the loop confirms with `"Done!"`
+  only if at least one *write* executor returned `ok: true`; otherwise
+  (read-only spin, or writes that all failed) it says it couldn't finish and
+  bumps `action_executions_total{action="tool_loop_exhausted",status="error"}`.
+  A blanket `"Done!"` here would be the same claim-without-call the system
+  prompt forbids the model from making.
 - Evals run the loop with `dry_run=True` contexts: calls are recorded, not
   executed; read tools return shaped empty results (a bare `{"ok": true}`
   stub measurably induced the model to hallucinate data).
