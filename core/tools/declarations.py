@@ -22,7 +22,8 @@ _TARGET_USER = {
     "type": "STRING",
     "description": "Household member as @username; '@everyone' for the whole household; omit for the message author.",
 }
-_ISO = "ISO-8601 datetime string, e.g. 2026-07-18T21:00:00"
+_ISO = ("ISO-8601 datetime in the household's LOCAL time (the second clock in the "
+        "current-time stamp), no offset, e.g. 2026-07-18T21:00:00")
 
 DECLARATIONS: dict[str, types.FunctionDeclaration] = {
     d.name: d
@@ -73,17 +74,33 @@ DECLARATIONS: dict[str, types.FunctionDeclaration] = {
         ),
         _fd(
             "create_calendar_event",
-            "Add an event to the shared household Google Calendar. Only when the user "
-            "explicitly asks for a calendar entry.",
+            "Add an event to the shared household Google Calendar. Use when the user "
+            "explicitly asks for a calendar entry, OR tags the bot with a pasted event "
+            "paragraph (invite, announcement, booking confirmation, email) and nothing "
+            "else — extract every field the text states; never invent missing ones. "
+            "Call once per distinct event in the text (e.g. a hotel stay AND a meeting during it).",
             {
-                "title": {"type": "STRING"},
-                "description": {"type": "STRING"},
-                "start_datetime": {"type": "STRING", "description": _ISO},
-                "end_datetime": {"type": "STRING", "description": f"{_ISO}; omit for start + 1 hour."},
+                "title": {"type": "STRING", "description": "Short event subject, e.g. 'Emma's 8th birthday party'."},
+                "description": {
+                    "type": "STRING",
+                    "description": "Useful details from the text not captured elsewhere: what to bring, "
+                    "dress code, RSVP, contacts, links, booking refs. Empty if none.",
+                },
+                "start_datetime": {"type": "STRING", "description": f"{_ISO}, wall-clock time in `timezone`. For all-day events use T00:00:00."},
+                "end_datetime": {"type": "STRING", "description": f"{_ISO}; omit for start + 1 hour. For all_day, the LAST day of the event (inclusive), e.g. a hotel stay's check-out date; omit for a single day."},
+                "location": {"type": "STRING", "description": "Venue name and/or address, or a meeting URL. Omit if not stated."},
+                "timezone": {
+                    "type": "STRING",
+                    "description": "IANA timezone the stated times are in (e.g. 'Asia/Taipei', 'America/New_York'). "
+                    "Set only if the text names one or it is clear from the location; omit to use the household calendar's.",
+                },
+                "all_day": {"type": "BOOLEAN", "description": "True when the text gives a date but no clock time. A duration alone (e.g. '120-minute') is not a time — never invent a start time."},
                 "attendees": {
                     "type": "ARRAY",
                     "items": {"type": "STRING"},
-                    "description": "Household @usernames to invite; their Google emails are resolved from profiles.",
+                    "description": "Who to invite: household @usernames the user names as coming, and/or email "
+                    "addresses the text invites. Omit otherwise — a guest/booking name or the sender "
+                    "is not an attendee.",
                 },
             },
             required=["title", "start_datetime"],
@@ -106,7 +123,7 @@ DECLARATIONS: dict[str, types.FunctionDeclaration] = {
             "Remove an event from the household calendar (fuzzy title match).",
             {
                 "title": {"type": "STRING"},
-                "start_datetime": {"type": "STRING", "description": f"{_ISO}; omit to search the next 7 days."},
+                "start_datetime": {"type": "STRING", "description": f"{_ISO}; omit to search the next year."},
             },
             required=["title"],
         ),

@@ -7,6 +7,7 @@ write tools (which do need Discord context).
 """
 
 from core.tools.declarations import DECLARATIONS
+from core.timeutil import utc_to_local
 from core.tools.registry import ToolContext, ToolRegistry
 from integrations.google_calendar import google_calendar
 from storage.repositories import chore_repo, member_repo, reminder_repo, todo_repo
@@ -25,7 +26,7 @@ async def _list_reminders(args: dict, ctx: ToolContext) -> dict:
                 "message": r.message,
                 "recurring": r.is_recurring,
                 "cron": r.cron_expression,
-                "fires_at_utc": _iso(r.trigger_time) if not r.is_recurring else None,
+                "fires_at_local": _iso(utc_to_local(r.trigger_time)) if not r.is_recurring else None,
                 "voice": r.voice,
                 "target_user_id": r.target_user_id,
             }

@@ -68,17 +68,20 @@ class TestDateTriggerUTC:
         assert rd.minute == 30
 
 
-class TestCronTriggerUTC:
-    def test_cron_trigger_uses_utc_timezone(self):
+class TestCronTriggerTimezone:
+    def test_cron_trigger_uses_household_timezone(self, monkeypatch):
+        # Cron fields are household-local wall-clock, so the trigger must run
+        # in the household tz (it used to be pinned to UTC: "9 am" fired at
+        # 1 am in Los Angeles).
+        from integrations.google_calendar import google_calendar
+        monkeypatch.setattr(google_calendar, "_calendar_timezone", "America/Los_Angeles")
         reminder = _one_time_reminder(
             is_recurring=True, cron_expression="0 9 * * *",
             trigger_time=datetime.utcnow(),
         )
         trigger = _capture_trigger(reminder)
         assert isinstance(trigger, CronTrigger)
-        # CronTrigger stores timezone as a tzinfo-compatible object
-        offset = trigger.timezone.utcoffset(datetime.utcnow()).total_seconds()
-        assert offset == 0
+        assert str(trigger.timezone) == "America/Los_Angeles"
 
     def test_cron_trigger_parses_all_fields(self):
         reminder = _one_time_reminder(

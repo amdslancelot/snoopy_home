@@ -5,7 +5,25 @@ from datetime import datetime, timedelta
 from evals.adapters import canonicalize_actions, canonicalize_tool_calls
 from evals.scorers.deterministic import match_value, normalize_cron, score_case
 
-NOW = datetime(2026, 7, 18, 12, 0, 0)
+import pytest
+
+from integrations.google_calendar import google_calendar
+
+NOW = datetime(2026, 7, 18, 12, 0, 0)  # naive UTC, as the runner passes it
+
+
+@pytest.fixture(autouse=True)
+def _household_utc(monkeypatch):
+    """Pin household tz to UTC so local == UTC unless a test says otherwise."""
+    monkeypatch.setattr(google_calendar, "_calendar_timezone", "UTC")
+
+
+def test_relative_minutes_reads_actual_as_household_local(monkeypatch):
+    # Taipei is UTC+8: 20:10 local == 12:10 UTC == NOW + 10 min.
+    monkeypatch.setattr(google_calendar, "_calendar_timezone", "Asia/Taipei")
+    spec = {"$relative_minutes": 10, "$tolerance_minutes": 2}
+    assert match_value(spec, "2026-07-18T20:10:00", NOW)[0]
+    assert not match_value(spec, "2026-07-18T12:10:00", NOW)[0]  # UTC-as-local is wrong
 
 
 # ── match_value ───────────────────────────────────────────────────────────────
@@ -110,3 +128,15 @@ def test_canonicalize_actions_drops_junk():
 def test_canonicalize_tool_calls_maps_name_and_args():
     calls = [{"name": "create_reminder", "args": {"message": "hi"}}]
     assert canonicalize_tool_calls(calls) == [{"type": "create_reminder", "message": "hi"}]
+
+
+def test_same_type_actions_match_in_any_order():
+    case = _case({"actions": [
+        {"type": "create_calendar_event", "args_subset": {"title": {"$icontains": "stay"}}},
+        {"type": "create_calendar_event", "args_subset": {"title": {"$icontains": "presentation"}}},
+    ]})
+    actions = [  # model emitted them in the opposite order
+        {"type": "create_calendar_event", "title": "Timeshare presentation"},
+        {"type": "create_calendar_event", "title": "Hyatt stay"},
+    ]
+    assert score_case(case, "medium", "calendar_op", actions, NOW).passed

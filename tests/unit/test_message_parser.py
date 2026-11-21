@@ -137,6 +137,48 @@ class TestIntentDetection:
         assert analyzer._detect_intent(text) == expected
 
 
+class TestPastedEventRouting:
+    """Pasted invites / booking confirmations carry no verb aimed at the bot
+    ("add", "schedule"), so they're detected by their own vocabulary. They must
+    reach calendar_op, which is never routed to the LOW tier (flash-lite
+    extracts multi-field events unreliably)."""
+
+    RESORT = (
+        "RESORT INFORMATION\n\n\tHyatt Vacation Club at Desert Oasis\n"
+        "34567 Cathedral Canyon Dr,\ncathedral City, Ca 92234\n\n\tYOUR RESERVATION\n\n"
+        "\tConfirmation Number: 1234567\n\nCheck-in: Fri., January 15, 2027\n\n"
+        "Checkout: Mon., January 18, 2027\n\nPresentation Date: Sat., January 16, 2027\n"
+    )
+
+    def test_resort_confirmation_routes_to_calendar_not_low(self, analyzer):
+        result = analyzer.analyze(self.RESORT)
+        assert result.detected_intent == "calendar_op"
+        assert result.tier != ModelTier.LOW
+
+    @pytest.mark.parametrize("text", [
+        "You're invited to Emma's birthday, Dec 12 at 2pm",
+        "Save the date: our wedding, June 6 2027",
+        "RSVP by Friday — dinner at 7pm Saturday",
+        "Check-in: Jan 15. Check-out: Jan 18.",
+        "Checkin Jan 15, checkout Jan 18",
+        "Confirmation number: ABC123, flight on March 3",
+        "Your reservation at Nobu is confirmed for 8pm Friday",
+        "Booking reference XYZ9, ferry departs 9am May 2",
+    ])
+    def test_pasted_event_vocabulary_is_calendar_op(self, analyzer, text):
+        assert analyzer._detect_intent(text) == "calendar_op"
+        assert analyzer.analyze(text).tier != ModelTier.LOW
+
+    @pytest.mark.parametrize("text,expected", [
+        # "check in" with a space is everyday English, not a booking
+        ("can you check in on grandma tomorrow", "general"),
+        ("tell my wife the package arrived", "relay_message"),
+        ("mark vacuuming as done", "complete_chore"),
+    ])
+    def test_lookalikes_do_not_become_calendar_op(self, analyzer, text, expected):
+        assert analyzer._detect_intent(text) == expected
+
+
 # ── Tier mapping ──────────────────────────────────────────────────────────────
 
 class TestTierMapping:

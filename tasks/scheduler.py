@@ -13,6 +13,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from core.observability import get_logger
+from core.timeutil import household_tz
 from storage.models import Reminder
 
 log = get_logger("scheduler")
@@ -56,10 +57,14 @@ def schedule_reminder(reminder: Reminder) -> str:
 
     if reminder.is_recurring and reminder.cron_expression:
         parts = reminder.cron_expression.split()
+        # Cron fields are household-local wall-clock (the model writes "7:30
+        # weekdays" as `30 7 * * 1-5`), so evaluate them in the household tz —
+        # not UTC, which shifted both the hour and, across midnight, the day.
+        # This also keeps them at the same local hour across DST changes.
         trigger = CronTrigger(
             minute=parts[0], hour=parts[1], day=parts[2],
             month=parts[3], day_of_week=parts[4],
-            timezone="UTC",
+            timezone=household_tz(),
         )
     else:
         # reminder.trigger_time is always a naive UTC datetime; attach tzinfo
