@@ -9,6 +9,9 @@ from core.observability import get_logger
 
 log = get_logger("calendar")
 
+# How far ahead update/delete search when the user names no date.
+_SEARCH_DAYS_AHEAD = 365
+
 
 def _best_title_match(query: str, items: list[dict]) -> Optional[dict]:
     """Return the best-matching event by title, or None if similarity < 0.6."""
@@ -80,9 +83,12 @@ class GoogleCalendarClient:
             time_min = (start_local - timedelta(hours=24)).isoformat()
             time_max = (start_local + timedelta(hours=24)).isoformat()
         else:
+            # No date given: search from yesterday to a year out. A 7-day
+            # window made "delete <event>" fail for anything booked further
+            # ahead (e.g. a January hotel stay asked about in November).
             now = datetime.utcnow()
-            time_min = now.isoformat() + "Z"
-            time_max = (now + timedelta(days=7)).isoformat() + "Z"
+            time_min = (now - timedelta(days=1)).isoformat() + "Z"
+            time_max = (now + timedelta(days=_SEARCH_DAYS_AHEAD)).isoformat() + "Z"
 
         loop = asyncio.get_running_loop()
         try:
@@ -96,6 +102,7 @@ class GoogleCalendarClient:
                     timeMax=time_max,
                     singleEvents=True,
                     orderBy="startTime",
+                    maxResults=2500,
                 )
                 .execute(),
             )
@@ -149,39 +156,80 @@ class GoogleCalendarClient:
         start: datetime,
         end: Optional[datetime],
         attendee_emails: list[str],
-    ) -> bool:
+        location: Optional[str] = None,
+        timezone: Optional[str] = None,
+        all_day: bool = False,
+    ) -> Optional[dict]:
+        """Insert the event. Returns {"invites_sent": bool} on success, None on failure.
+
+        A service account on a consumer (@gmail.com) calendar cannot invite
+        attendees — Google returns 403 "Service accounts cannot invite attendees
+        without Domain-Wide Delegation of Authority" (DWD exists only on Google
+        Workspace). On that error the event is re-created without attendees and
+        their addresses are noted in the description instead.
+        """
         service = self._get_service()
         if not service:
-            return False
+            return None
 
         tz = self.timezone
-        if end is None:
-            end = start + timedelta(hours=1)
+        if timezone:
+            try:
+                ZoneInfo(timezone)
+                tz = timezone
+            except Exception:
+                log.warning("invalid_event_timezone", timezone=timezone, fallback=tz)
+
+        if all_day:
+            # Google all-day events use `date` with an EXCLUSIVE end, while the
+            # model sends the last day itself (check-out Jan 18 → end Jan 18).
+            # Add a day so the last day shows on the calendar.
+            last_day = max((end or start).date(), start.date())
+            end_date = last_day + timedelta(days=1)
+            start_field = {"date": start.date().isoformat()}
+            end_field = {"date": end_date.isoformat()}
+        else:
+            if end is None:
+                end = start + timedelta(hours=1)
+            start_field = {"dateTime": start.isoformat(), "timeZone": tz}
+            end_field = {"dateTime": end.isoformat(), "timeZone": tz}
 
         body = {
             "summary": title,
             "description": description,
-            "start": {"dateTime": start.isoformat(), "timeZone": tz},
-            "end": {"dateTime": end.isoformat(), "timeZone": tz},
+            "start": start_field,
+            "end": end_field,
             "attendees": [{"email": e} for e in attendee_emails if e],
         }
+        if location:
+            body["location"] = location
 
         loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(
-                None,
-                lambda: service.events()
-                .insert(
-                    calendarId=settings.household_calendar_id,
-                    body=body,
-                    sendUpdates="all",
-                )
-                .execute(),
+
+        def _insert(b: dict):
+            return (
+                service.events()
+                .insert(calendarId=settings.household_calendar_id, body=b, sendUpdates="all")
+                .execute()
             )
-            return True
+
+        try:
+            await loop.run_in_executor(None, lambda: _insert(body))
+            return {"invites_sent": bool(body["attendees"])}
         except Exception as exc:
+            if body["attendees"] and "Domain-Wide Delegation" in str(exc):
+                emails = [a["email"] for a in body["attendees"]]
+                log.warning("invites_unsupported_retrying_without", title=title, attendees=emails)
+                retry = {**body, "attendees": []}
+                note = "Attendees (invites not supported by this calendar): " + ", ".join(emails)
+                retry["description"] = f"{description}\n\n{note}" if description else note
+                try:
+                    await loop.run_in_executor(None, lambda: _insert(retry))
+                    return {"invites_sent": False}
+                except Exception as exc2:
+                    exc = exc2
             log.error("create_event_failed", title=title, error=str(exc))
-            return False
+            return None
 
     async def update_event(
         self,
@@ -191,15 +239,18 @@ class GoogleCalendarClient:
         new_start: Optional[datetime] = None,
         new_end: Optional[datetime] = None,
         new_description: Optional[str] = None,
-    ) -> bool:
+    ) -> Optional[str]:
+        """Patch the best fuzzy title match. Returns the MATCHED event's title
+        (which may differ from `title`), or None if nothing was updated."""
         service = self._get_service()
         if not service:
-            return False
+            return None
 
         match = await self._find_event(title, start)
         if not match:
             log.warning("update_event_not_found", title=title)
-            return False
+            return None
+        matched_title = match.get("summary", "")
 
         event_id = match["id"]
         tz = self.timezone
@@ -230,7 +281,7 @@ class GoogleCalendarClient:
             patch["end"] = {"dateTime": self._local(new_end).isoformat(), "timeZone": tz}
 
         if not patch:
-            return True
+            return matched_title
 
         loop = asyncio.get_running_loop()
         try:
@@ -244,21 +295,23 @@ class GoogleCalendarClient:
                 )
                 .execute(),
             )
-            log.info("event_updated", event_id=event_id, fields=list(patch.keys()))
-            return True
+            log.info("event_updated", event_id=event_id, title=matched_title, fields=list(patch.keys()))
+            return matched_title
         except Exception as exc:
             log.error("update_event_failed", title=title, error=str(exc))
-            return False
+            return None
 
-    async def delete_event(self, title: str, start: Optional[datetime]) -> bool:
+    async def delete_event(self, title: str, start: Optional[datetime]) -> Optional[str]:
+        """Delete the best fuzzy title match. Returns the MATCHED event's title
+        (which may differ from `title`), or None if nothing was deleted."""
         service = self._get_service()
         if not service:
-            return False
+            return None
 
         match = await self._find_event(title, start)
         if not match:
             log.warning("delete_event_not_found", title=title)
-            return False
+            return None
 
         event_id = match["id"]
         loop = asyncio.get_running_loop()
@@ -273,10 +326,10 @@ class GoogleCalendarClient:
                 .execute(),
             )
             log.info("event_deleted", event_id=event_id, title=match.get("summary"))
-            return True
+            return match.get("summary", "")
         except Exception as exc:
             log.error("delete_event_failed", title=title, error=str(exc))
-            return False
+            return None
 
 
 google_calendar = GoogleCalendarClient()

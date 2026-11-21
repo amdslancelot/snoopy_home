@@ -138,8 +138,23 @@ _PROMPT_SECTIONS_123 = (
     "  Update     : \"move / reschedule / change / rename [event] to [new time or name]\"\n"
     "               \"reschedule dentist to next Tuesday\", \"move yoga to Friday 10am\"\n"
     "  Delete     : \"delete / remove / cancel [event] from calendar\"\n"
+    "  Fuzzy match: update/delete return the title actually matched (\"updated\" /\n"
+    "               \"deleted\"). Name THAT event in the reply, even if it differs from\n"
+    "               what the user typed.\n"
     "  Duration   : default to 1 hour when no end time is given\n"
     "  Attendees  : list household member @usernames; the bot resolves their Google emails\n"
+    "  Pasted event: a pasted invite / announcement / booking confirmation that states\n"
+    "               an event DATE counts as \"add this to the calendar\". Fill title, start/end,\n"
+    "               all_day, timezone, location, attendees (named members + email addresses)\n"
+    "               and description (RSVP, what to bring, links) only from what the text says.\n"
+    "               NO clock time in the text → all_day=true. A duration (\"120-minute\n"
+    "               presentation\") is NOT a start time; never guess one.\n"
+    "               Attendees: only people the text invites or household members the user\n"
+    "               @mentions as coming. A guest/booking name or the sender is NOT an attendee.\n"
+    "               One create_calendar_event per distinct dated event in the text (a stay\n"
+    "               AND an appointment during it = two events).\n"
+    "               Short instructions about a person (\"tell X ...\", \"let X know ...\") are\n"
+    "               NOT pasted events — rule 1.3 still applies to them.\n"
     "\n"
     "1.5 Voice Announcements\n"
     "  Announce   : \"announce to the house that dinner is ready\"\n"
@@ -236,7 +251,8 @@ _PROMPT_SECTION4_LEGACY = (
     "  \"attendees\"      : [\"@alice\", \"@bob\"]\n"
     "}\n"
     "  end_datetime = null or omitted → defaults to start + 1 hour.\n"
-    "  attendees    = list of household @usernames to invite; may be empty.\n"
+    "  attendees    = list of household @usernames and/or email addresses; may be empty.\n"
+    "  Optional     : \"location\", \"timezone\" (IANA), \"all_day\" (true/false).\n"
     "  Only emit this action when the user explicitly asks to add a calendar event.\n"
     "\n"
     "── Action: update_calendar_event ────────────────────────\n"
@@ -631,6 +647,8 @@ _PROMPT_SECTIONS_567 = (
     "SECTION 7 — EDGE CASES AND GUARDRAILS\n"
     "═══════════════════════════════════════════════════════════\n"
     "\n"
+    "- Weekday names (\"Friday at 10 am\") mean the NEXT future occurrence: if that day is\n"
+    "  today and the time has already passed, use the same weekday next week.\n"
     "- Ambiguous time (\"remind me later\"): ask \"When exactly — this evening, or a\n"
     "  specific time?\"\n"
     "- 'Remind X that Y in Z time' or 'remind X to Y at T': always create_reminder.\n"
@@ -957,7 +975,7 @@ class GeminiClient:
 
     @staticmethod
     def _stamp_date(messages: list[dict]) -> list[dict]:
-        """Prepend current datetime (UTC + household local time) to the most recent user message.
+        """Prepend the current household-local datetime to the most recent user message.
 
         Prefers the timezone the Google Calendar integration auto-detected
         from the household's actual calendar (`google_calendar.timezone`)
@@ -975,7 +993,10 @@ class GeminiClient:
         if tz and tz != "UTC":
             try:
                 local_now = datetime.now(tz=ZoneInfo(tz))
-                ts += local_now.strftime(f" / %Y-%m-%d %H:%M:%S ({tz})")
+                # ONLY the local clock: handlers read every datetime arg as
+                # household-local (core/timeutil). Showing UTC as well made
+                # the model pick either clock at random (evals rem-rel-*).
+                ts = local_now.strftime(f"%Y-%m-%d %H:%M:%S %A ({tz} local time)")
             except Exception:
                 pass
         for i in range(len(stamped) - 1, -1, -1):

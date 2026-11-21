@@ -129,7 +129,10 @@ class ComplexityAnalyzer:
             r"\b(event|calendar|meeting|appointment)\b"
             r"|\b(event|calendar|meeting|appointment)\b"
             r".{0,50}"
-            r"\b(add|create|schedule|book|delete|remove|update|move|reschedule)\b",
+            r"\b(add|create|schedule|book|delete|remove|update|move|reschedule)\b"
+            # Pasted invites / announcements carry no verb aimed at the bot.
+            r"|\b(you'?re invited|rsvp|save the date|check-?in|check-?out|"
+            r"confirmation (number|code|#)|your reservation|booking (reference|confirmation))\b",
             re.IGNORECASE,
         )),
         ("set_reminder",    re.compile(

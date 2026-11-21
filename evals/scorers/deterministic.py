@@ -27,6 +27,8 @@ times, cron spacing, name casing):
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from core.timeutil import local_to_utc
+
 
 @dataclass
 class CaseScore:
@@ -42,7 +44,8 @@ def _parse_iso(value) -> datetime | None:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return dt.replace(tzinfo=None) if dt.tzinfo else dt
+    # Datetimes are household-local (core/timeutil); `now` is naive UTC.
+    return local_to_utc(dt)
 
 
 def normalize_cron(expr) -> str:
@@ -140,7 +143,10 @@ def score_case(
     else:
         remaining = list(considered)
         for exp in expected_actions:
-            candidate = next((a for a in remaining if a.get("type") == exp["type"]), None)
+            # Several actions of one type (e.g. two calendar events) can come
+            # in any order: prefer a candidate that fully matches.
+            same = [a for a in remaining if a.get("type") == exp["type"]]
+            candidate = next((a for a in same if not _match_action(exp, a, now)), same[0])
             remaining.remove(candidate)
             problems = _match_action(exp, candidate, now)
             if problems:

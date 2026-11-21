@@ -67,13 +67,23 @@ class TestStampDate:
     def test_empty_messages_returned_unchanged(self, client):
         assert client._stamp_date([]) == []
 
-    def test_prepends_utc_timestamp_to_last_user_message(self, client):
-        messages = [{"role": "user", "content": "remind me to buy milk"}]
-        stamped = client._stamp_date(messages)
+    def test_utc_household_gets_utc_stamp(self, client, monkeypatch):
+        from integrations.google_calendar import google_calendar
+        monkeypatch.setattr(google_calendar, "_calendar_timezone", "UTC")
+        stamped = client._stamp_date([{"role": "user", "content": "remind me to buy milk"}])
         content = stamped[0]["content"]
         assert content.startswith("[")
         assert "UTC" in content
         assert "remind me to buy milk" in content
+
+    def test_non_utc_household_gets_only_local_clock(self, client, monkeypatch):
+        # Tool args are read as household-local (core/timeutil); a second UTC
+        # clock in the stamp made the model mix the two.
+        from integrations.google_calendar import google_calendar
+        monkeypatch.setattr(google_calendar, "_calendar_timezone", "Asia/Taipei")
+        content = client._stamp_date([{"role": "user", "content": "hi"}])[0]["content"]
+        assert "Asia/Taipei local time" in content
+        assert "UTC" not in content
 
     def test_only_last_user_message_modified(self, client):
         messages = [

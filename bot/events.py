@@ -19,6 +19,7 @@ from core.tools import read_tools
 from core.tools.declarations import DECLARATIONS
 from core.tools.registry import ToolContext, registry
 from integrations.google_calendar import google_calendar
+from core.timeutil import household_tz, local_to_utc, to_household_local, utc_to_local
 from integrations.voice_tts import speak_in_channel
 from storage.repositories import chore_repo, member_repo, todo_repo, user_settings_repo
 from tasks.reminder import reminder_manager
@@ -213,7 +214,10 @@ async def _do_create_reminder(
     if is_recurring and cron_expr:
         trigger_time = datetime.utcnow()
     else:
-        trigger_time = _parse_dt(raw_dt)
+        # The model emits household-local wall-clock time; the scheduler and
+        # the DB run on naive UTC.
+        local = _parse_dt(raw_dt)
+        trigger_time = local_to_utc(local) if local else None
 
     now_utc = datetime.utcnow()
 
@@ -262,7 +266,7 @@ async def _do_create_reminder(
     return {
         "ok": True,
         "reminder_id": reminder.id,
-        "fires_at_utc": trigger_time.isoformat(),
+        "fires_at_local": utc_to_local(trigger_time).isoformat(),
         "recurring": is_recurring,
     }
 
@@ -348,30 +352,63 @@ async def _do_create_calendar_event(
             )
         return {"ok": False, "error": f"could not parse start time {raw_start!r}"}
 
-    # Resolve attendee @usernames → google_email from their profiles
+    # Resolve attendees: raw email addresses pass through; household
+    # @usernames → google_email from their profiles. Unresolved names are
+    # reported back so the model can tell the user who was not invited.
     attendee_emails: list[str] = []
+    unresolved: list[str] = []
     for mention in action.get("attendees") or []:
+        mention = (mention or "").strip()
+        if _EMAIL_RE.fullmatch(mention):
+            attendee_emails.append(mention)
+            continue
         username = mention.lstrip("@").lower()
         profile = await member_repo.find_profile_by_name(guild_id, username)
         email = (profile or {}).get("google_email")
         if email:
             attendee_emails.append(email)
+        elif mention:
+            unresolved.append(mention)
+    attendee_emails = list(dict.fromkeys(attendee_emails))  # dedupe, keep order
 
-    ok = await google_calendar.create_event(
+    # The sender is never their own invitee: the model kept listing whoever
+    # pasted a booking, and an invite to yourself is noise (and, on a
+    # service-account calendar, a 403 — see GoogleCalendarClient.create_event).
+    sender_name = source.author.name.lower()
+    sender_profile = await member_repo.find_profile_by_name(guild_id, sender_name)
+    sender_email = ((sender_profile or {}).get("google_email") or "").lower()
+    attendee_emails = [e for e in attendee_emails if e.lower() != sender_email]
+    unresolved = [u for u in unresolved if u.lstrip("@").lower() != sender_name]
+
+    created = await google_calendar.create_event(
         title=action.get("title", "Untitled event"),
         description=action.get("description", ""),
         start=start,
         end=end,
         attendee_emails=attendee_emails,
+        location=(action.get("location") or "").strip() or None,
+        timezone=(action.get("timezone") or "").strip() or None,
+        all_day=bool(action.get("all_day")),
     )
-    if not ok:
+    if created is None:
         if notify:
             await source.channel.send(
                 "Hmm, I couldn't create the calendar event. "
                 "Check that the service account has edit access to the household calendar."
             )
         return {"ok": False, "error": "calendar API call failed"}
-    return {"ok": True, "title": action.get("title"), "invited": attendee_emails}
+    return {
+        "ok": True,
+        "title": action.get("title"),
+        "start": start.isoformat(),
+        "location": action.get("location"),
+        "timezone": action.get("timezone") or google_calendar.timezone,
+        "invited": attendee_emails if created["invites_sent"] else [],
+        # Invites are impossible from a service account on a @gmail.com
+        # calendar; the names were noted in the event description instead.
+        "invites_unsupported_noted_in_description": [] if created["invites_sent"] else attendee_emails,
+        "not_invited_no_email": unresolved,
+    }
 
 
 async def _do_update_calendar_event(
@@ -391,7 +428,7 @@ async def _do_update_calendar_event(
     new_start = _parse_dt(action.get("new_start_datetime")) if action.get("new_start_datetime") else None
     new_end = _parse_dt(action.get("new_end_datetime")) if action.get("new_end_datetime") else None
 
-    ok = await google_calendar.update_event(
+    matched = await google_calendar.update_event(
         title=title,
         start=start,
         new_title=action.get("new_title") or None,
@@ -399,7 +436,7 @@ async def _do_update_calendar_event(
         new_end=new_end,
         new_description=action.get("new_description") if "new_description" in action else None,
     )
-    if not ok:
+    if matched is None:
         if notify:
             await source.channel.send(
                 f"Hmm, I couldn't find \"{title}\" on the calendar"
@@ -407,7 +444,9 @@ async def _do_update_calendar_event(
                 + " to update it. Check the event name or time?"
             )
         return {"ok": False, "error": f"no calendar event matching '{title}' found to update"}
-    return {"ok": True, "title": title}
+    # Report the event actually changed: the match is fuzzy, so it can differ
+    # from what the user said, and the reply must not hide that.
+    return {"ok": True, "updated": matched, "requested": title}
 
 
 async def _do_delete_calendar_event(
@@ -426,8 +465,8 @@ async def _do_delete_calendar_event(
     raw_start = action.get("start_datetime")
     start = _parse_dt(raw_start) if raw_start else None
 
-    ok = await google_calendar.delete_event(title=title, start=start)
-    if not ok:
+    matched = await google_calendar.delete_event(title=title, start=start)
+    if matched is None:
         if notify:
             await source.channel.send(
                 f"Hmm, I couldn't find \"{title}\" on the calendar"
@@ -435,7 +474,7 @@ async def _do_delete_calendar_event(
                 + ". Double-check the event name or time?"
             )
         return {"ok": False, "error": f"no calendar event matching '{title}' found to delete"}
-    return {"ok": True, "deleted": title}
+    return {"ok": True, "deleted": matched, "requested": title}
 
 
 async def _do_speak_in_voice(
@@ -465,7 +504,7 @@ async def cmd_reminders(interaction: discord.Interaction):
         return
     lines = [
         f"**#{r.id}** — {r.message} "
-        f"({'recurring: ' + r.cron_expression if r.is_recurring else r.trigger_time.strftime('%Y-%m-%d %H:%M UTC')})"
+        f"({'recurring: ' + r.cron_expression if r.is_recurring else utc_to_local(r.trigger_time).strftime('%Y-%m-%d %H:%M') + ' ' + household_tz().key})"
         for r in items
     ]
     await interaction.response.send_message("\n".join(lines), ephemeral=True)
@@ -755,13 +794,17 @@ async def _resolve_home_guild(user: discord.User) -> Optional[int]:
     return None
 
 
+_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+
 def _parse_dt(raw: str) -> Optional[datetime]:
     if not raw:
         return None
+    """Parse an LLM datetime into naive HOUSEHOLD-LOCAL time (see core/timeutil)."""
     try:
-        return datetime.fromisoformat(raw)
+        return to_household_local(datetime.fromisoformat(raw))
     except (ValueError, TypeError):
-        return reminder_manager.parse_datetime(raw)
+        return reminder_manager.parse_datetime(raw, tz=household_tz().key)
 
 
 async def _upsert_member(user: Union[discord.Member, discord.User], guild_id: int):

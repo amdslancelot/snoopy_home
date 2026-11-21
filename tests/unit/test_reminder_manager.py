@@ -57,7 +57,12 @@ class TestParseDatetime:
     def test_in_n_minutes_returns_future_datetime(self):
         result = ReminderManager.parse_datetime("in 5 minutes")
         assert result is not None
-        diff = (result - datetime.utcnow()).total_seconds()
+        # parse_datetime returns naive time in the given tz (household-local),
+        # not UTC — compare against the clock in that same tz.
+        from zoneinfo import ZoneInfo
+        from config import settings
+        local_now = datetime.now(ZoneInfo(settings.timezone)).replace(tzinfo=None)
+        diff = (result - local_now).total_seconds()
         # Should be roughly 5 min (300s), allow generous ±2 min window
         assert 60 < diff < 500
 
