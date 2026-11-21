@@ -14,11 +14,14 @@ python main.py           # runs migrations, starts health server + bot
 ```
 
 Don't run this alongside the staging bot pod at the same time — both would
-schedule reminders and write chore/todo state against the same rows.
+schedule reminders and write chore/todo state against the same rows. There is
+no dev bot: `.env` holds the **staging** bot's token, so dev is tested in the
+"Snoopy Home Staging" Discord server and writes to the "Snoopy Home Stage"
+calendar (identity map: §0 of `docs/dev-stage-minikube-runbook.md`).
 
 Requires a `.env` — copy `.env.example`; minimum `DISCORD_TOKEN`, `GEMINI_API_KEY`, `DATABASE_URL` (no code default — see `.env.example`). Python 3.11+.
 
-Tests: `pytest tests/` (unit + Postgres integration; integration skips without a reachable `TEST_DATABASE_URL` database — create `snoopy_test` on the local Postgres; `live`-marked tests hit the real Gemini API and only run with a real key). Evals: `python -m evals.runner [--judge]`.
+Tests: `pytest tests/` (unit + Postgres integration; integration skips without a reachable `TEST_DATABASE_URL` database — create `snoopy_test` on the local Postgres and `export TEST_DATABASE_URL` in the shell — not in `.env`, which rejects unknown keys; `pytest -rs` shows why tests skipped; `live`-marked tests hit the real Gemini API and only run with a real key). Evals: `python -m evals.runner [--judge]`.
 
 ## Architecture
 
